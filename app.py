@@ -111,21 +111,18 @@ def tratar_e_traduzir_df(df, sistema):
     df_tratado = df_tratado.rename(columns=TRADUCAO_CABECALHOS.get(sigla_sistema, {}))
     return df_tratado
 
-# --- CONECTOR ROBUSTO DATASUS ---
+# --- CONECTOR ROBUSTO DATASUS (SEM CACHE PARA NÃO VICIAR ERROS FTP) ---
 
-@st.cache_data
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None):
     if not sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     
     df_final = pd.DataFrame()
-    # Sistemas mensais precisam de loop se o usuário quiser o ano todo
     meses_para_baixar = [mes_num] if mes_num else list(range(1, 13))
 
     for uf in ufs_lista:
         try:
             resultados = []
             
-            # Bases puramente mensais
             if sistema in ["Internações (SIH-SP)", "Estabelecimentos (CNES)"]:
                 for m in meses_para_baixar:
                     try:
@@ -133,36 +130,37 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None):
                         if isinstance(res, list): resultados.extend(res)
                         elif res is not None: resultados.append(res)
                     except: continue
-            
-            # Bases puramente anuais
             else:
-                if sistema == "Mortalidade (SIM)": res = sim(state=uf, year=ano)
-                elif sistema == "Nascimentos (SINASC)": res = sinasc(state=uf, year=ano)
-                elif sistema == "Notificações (SINAN)": res = sinan(disease=agravo, state=uf, year=ano)
-                
-                if isinstance(res, list): resultados.extend(res)
-                elif res is not None: resultados.append(res)
+                try:
+                    if sistema == "Mortalidade (SIM)": res = sim(state=uf, year=ano)
+                    elif sistema == "Nascimentos (SINASC)": res = sinasc(state=uf, year=ano)
+                    elif sistema == "Notificações (SINAN)": res = sinan(disease=agravo, state=uf, year=ano)
+                    
+                    if isinstance(res, list): resultados.extend(res)
+                    elif res is not None: resultados.append(res)
+                except: continue
             
-            # Consolidar as leituras garantindo que lê `.parquet` e limpa falhas
+            # Leitor universal à prova de falhas (Pandas vs PyArrow vs Strings)
             for r in resultados:
                 try:
-                    df_temp = r if isinstance(r, pd.DataFrame) else pd.read_parquet(r)
+                    if isinstance(r, pd.DataFrame):
+                        df_temp = r
+                    elif hasattr(r, 'to_pandas'): 
+                        df_temp = r.to_pandas() # Converte tabelas PyArrow
+                    elif isinstance(r, str):
+                        df_temp = pd.read_parquet(r) # Lê caminhos do FTP local
+                    else:
+                        continue
                     df_final = pd.concat([df_final, df_temp], ignore_index=True)
-                except: continue
+                except Exception as e:
+                    continue
                     
         except Exception: continue
             
     if df_final.empty:
-        return pd.DataFrame({"Erro": ["O Datasus (FTP) não retornou dados. Isso geralmente ocorre porque o servidor federal recusou a conexão temporariamente ou o agravo/ano selecionado ainda não foi disponibilizado."] })
+        return pd.DataFrame({"Erro": ["O Datasus (FTP) não retornou dados. Se o agravo existir, tente novamente em alguns segundos para forçar uma nova conexão."] })
     
-    # Remove duplicações se o PySUS baixou arquivos sobrepostos
     return df_final.drop_duplicates()
-
-def baixar_excel(df):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Dados')
-    return output.getvalue()
 
 # --- INTERFACE ---
 
@@ -211,38 +209,39 @@ if fonte == "🏥 Saúde (DATASUS)":
     mes_sel = None if nome_mes == "Todos os Meses" else int(nome_mes.split(" - ")[0])
     
     if st.button(f"🔍 Consultar Base"):
-        with st.spinner(f"Processando conexões com o Datasus... isso pode demorar alguns minutos para bases muito grandes."):
+        with st.spinner(f"Extraindo dados e aplicando filtros para {nome_local}... isso pode levar alguns segundos."):
             df_bruto = buscar_datasus_v7(sistema, ufs_selecionadas, ano_sel, mes_sel, agravo_sel)
             
             if not df_bruto.empty and "Erro" not in df_bruto.columns:
                 
-                # 1. FILTRO RIGOROSO DE MUNICÍPIO
+                # 1. FILTRO RIGOROSO DE MUNICÍPIO (Resistente a nulos e formatos decimais)
                 if nivel_terr == "Município":
                     col_map = {"Mortalidade (SIM)": "CODMUNRES", "Internações (SIH-SP)": "SP_GESTOR", "Nascimentos (SINASC)": "CODMUNRES", "Estabelecimentos (CNES)": "CODUFMUN", "Notificações (SINAN)": "ID_MN_RESI"}
                     col_filtro = col_map.get(sistema)
                     if col_filtro in df_bruto.columns:
-                        # O fillna garante que os NaNs não destruam o filtro, e força o formato string correto
-                        df_bruto[col_filtro] = df_bruto[col_filtro].fillna("").astype(str)
+                        # Limpa zeros decimais indesejados lidos pelo pandas (ex: 310620.0 -> 310620)
+                        df_bruto[col_filtro] = df_bruto[col_filtro].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
                         df_bruto = df_bruto[df_bruto[col_filtro].str.startswith(id_datasus_alvo)]
                 
-                # 2. FILTRO DE MÊS PARA BASES ANUAIS
+                # 2. FILTRO SEGURO DE MÊS (Resistente a perda de zeros à esquerda)
                 if mes_sel is not None and sistema in ["Mortalidade (SIM)", "Nascimentos (SINASC)", "Notificações (SINAN)"]:
                     mes_str = str(mes_sel).zfill(2)
                     if sistema == "Mortalidade (SIM)" and "DTOBITO" in df_bruto.columns:
-                        df_bruto = df_bruto[df_bruto["DTOBITO"].astype(str).str[2:4] == mes_str]
+                        df_bruto["DTOBITO"] = df_bruto["DTOBITO"].astype(str).str.replace(r'\.0$', '', regex=True).str.zfill(8)
+                        df_bruto = df_bruto[df_bruto["DTOBITO"].str[2:4] == mes_str]
                     elif sistema == "Nascimentos (SINASC)" and "DTNASC" in df_bruto.columns:
-                        df_bruto = df_bruto[df_bruto["DTNASC"].astype(str).str[2:4] == mes_str]
+                        df_bruto["DTNASC"] = df_bruto["DTNASC"].astype(str).str.replace(r'\.0$', '', regex=True).str.zfill(8)
+                        df_bruto = df_bruto[df_bruto["DTNASC"].str[2:4] == mes_str]
                     elif sistema == "Notificações (SINAN)" and "DT_NOTIFIC" in df_bruto.columns:
-                        # SINAN tem formato YYYYMMDD ou YYYY-MM-DD
-                        df_bruto = df_bruto[df_bruto["DT_NOTIFIC"].astype(str).str.replace("-", "").str[4:6] == mes_str]
+                        dt_notific_limpa = df_bruto["DT_NOTIFIC"].astype(str).str.replace("-", "").str.replace(r'\.0$', '', regex=True)
+                        df_bruto = df_bruto[dt_notific_limpa.str[4:6] == mes_str]
                 
-                # Checa se sobrou dados após os filtros locais
                 if df_bruto.empty:
-                    st.warning("A conexão com o Datasus funcionou, mas não houve nenhum registro para os filtros de município e mês que você aplicou.")
+                    st.warning(f"O Datasus conectou com sucesso, mas retornou ZERO ocorrências para {nome_local} no mês/ano selecionado.")
                 else:
                     df_tratado = tratar_e_traduzir_df(df_bruto, sistema)
                     agravo_titulo = f" ({nome_agravo})" if agravo_sel else ""
-                    st.markdown(f'<div class="metric-card"><h2>{len(df_bruto)} Registros Reais Encontrados</h2><p>{sistema}{agravo_titulo} - {nome_local} ({ano_sel})</p></div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="metric-card"><h2>{len(df_bruto)} Registros Encontrados</h2><p>{sistema}{agravo_titulo} - {nome_local} ({ano_sel})</p></div>', unsafe_allow_html=True)
                     st.info("💡 Apenas as primeiras 100 linhas são exibidas. Use os botões para exportar a base completa.")
                     
                     col1, col2 = st.columns(2)
@@ -260,8 +259,6 @@ if fonte == "🏥 Saúde (DATASUS)":
 
 else:
     st.subheader(f"🏠 Indicadores Sociais - {nome_local}")
-    st.info("Conectando ao sistema VIS DATA 3 (MDS / SAGICAD).")
-    
     if st.button("🔍 Extrair Tabelas MDS"):
         with st.spinner("Ultrapassando protocolos do servidor federal..."):
             url_mds = f"https://aplicacoes.cidadania.gov.br/vis/data3/v.php?ibge={id_ibge_alvo}"
