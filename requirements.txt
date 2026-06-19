@@ -1,0 +1,8 @@
+streamlit
+requests
+pandas
+PySUS==2.3.0
+fastparquet
+pyarrow
+dbfread
+wget
