@@ -1,8 +1,10 @@
 streamlit
-requests
 pandas
+requests
 PySUS==2.3.0
 fastparquet
 pyarrow
 dbfread
 wget
+beautifulsoup4
+lxml
