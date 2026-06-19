@@ -2,7 +2,11 @@ import streamlit as st
 import pandas as pd
 import requests
 import io
+import urllib3
 from datetime import datetime
+
+# Desativa avisos de segurança SSL para APIs governamentais instáveis
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Configuração da página
 st.set_page_config(
@@ -16,7 +20,7 @@ st.markdown("""
     <style>
     .header-sidra { background-color: #003366; padding: 20px; color: white; border-radius: 5px; text-align: center; margin-bottom: 20px; }
     .stButton>button { background-color: #003366; color: white; width: 100%; }
-    .metric-card { background-color: #f0f2f6; padding: 15px; border-radius: 10px; border-left: 5px solid #003366; }
+    .metric-card { background-color: #f0f2f6; padding: 15px; border-radius: 10px; border-left: 5px solid #003366; text-align: center;}
     </style>
 """, unsafe_allow_html=True)
 
@@ -32,21 +36,22 @@ ESTADOS_IBGE = {
 }
 
 @st.cache_data
-def buscar_municipios():
-    url = "https://servicodados.ibge.gov.br/api/v1/localidades/municipios"
+def buscar_municipios_por_uf(uf_sigla):
+    """Busca municípios apenas da UF selecionada para evitar timeout do IBGE"""
+    url = f"https://servicodados.ibge.gov.br/api/v1/localidades/estados/{uf_sigla}/municipios"
     try:
-        res = requests.get(url, timeout=10).json()
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(url, headers=headers, timeout=10).json()
         mun_dict = {}
         for m in res:
-            uf = m['microrregiao']['mesorregiao']['UF']['sigla']
             nome = m['nome']
             id7 = str(m['id'])
             id6 = id7[:6] # Padrão DATASUS
-            mun_dict[f"{nome} - {uf}"] = {"id7": id7, "id6": id6, "uf": uf, "nome": nome}
+            mun_dict[nome] = {"id7": id7, "id6": id6, "nome": nome, "uf": uf_sigla}
         return mun_dict
     except:
-        # Fallback de segurança com BH corrigida
-        return {"Belo Horizonte - MG": {"id7": "3106200", "id6": "310620", "uf": "MG", "nome": "Belo Horizonte"}}
+        st.error(f"Erro ao acessar API do IBGE para a UF {uf_sigla}.")
+        return {"Belo Horizonte": {"id7": "3106200", "id6": "310620", "nome": "Belo Horizonte", "uf": "MG"}}
 
 try:
     from pysus.api._impl.databases import sim, sih, cnes, sinasc
@@ -64,9 +69,9 @@ MESES = {
     "09 - Setembro": 9, "10 - Outubro": 10, "11 - Novembro": 11, "12 - Dezembro": 12
 }
 
-# --- DICIONÁRIOS DE TRATAMENTO ---
+# --- DICIONÁRIOS E TRADUÇÃO DE CABEÇALHOS ---
 
-DICIONARIOS = {
+DICIONARIOS_VALORES = {
     "SIM": {
         "ACIDTRAB": {"1": "Sim", "2": "Não"},
         "CIRCOBITO": {"1": "Acidente", "2": "Suicídio", "3": "Homicídio", "4": "Outros"},
@@ -87,25 +92,71 @@ DICIONARIOS = {
     }
 }
 
-def aplicar_dicionarios(df, sistema):
+TRADUCAO_CABECALHOS = {
+    "SIM": {
+        "ACIDTRAB": "Acidente de Trabalho", "ASSISTMED": "Assistência Médica", "CAUSABAS": "Causa Básica (CID-10)",
+        "CIRCOBITO": "Circunstância do Óbito", "CODESTAB": "Código CNES (Óbito)", "CODMUNOCOR": "Município Ocorrência",
+        "CODMUNRES": "Município Residência", "DTNASC": "Data de Nascimento", "DTOBITO": "Data do Óbito",
+        "ESC": "Escolaridade", "ESC2010": "Escolaridade (2010)", "ESCMAE": "Escolaridade da Mãe",
+        "ESTCIV": "Estado Civil", "FONTE": "Fonte da Informação", "HORAOBITO": "Hora do Óbito",
+        "IDADE": "Idade", "IDADEMAE": "Idade da Mãe", "LINHAA": "Causa Imediata (Linha A)",
+        "LINHAB": "Causa Antecedente (Linha B)", "LINHAC": "Causa Antecedente (Linha C)",
+        "LINHAD": "Causa Antecedente (Linha D)", "LINHAII": "Outras Condições (Linha II)",
+        "LOCOCOR": "Local de Ocorrência", "NECROPSIA": "Necropsia", "OBITOGRAV": "Óbito na Gravidez",
+        "OBITOPUERP": "Óbito no Puerpério", "OCUP": "Ocupação (CBO)", "QTDFILMORT": "Filhos Mortos",
+        "QTDFILVIVO": "Filhos Vivos", "RACACOR": "Raça/Cor", "SEXO": "Sexo", "TIPOBITO": "Tipo de Óbito"
+    },
+    "SIH": {
+        "SP_AA": "Ano Competência", "SP_ATOPROF": "Ato Profissional", "SP_CNES": "Código Hospital (CNES)",
+        "SP_CPFCGC": "CPF/CNPJ Prestador", "SP_DTINTER": "Data Internação", "SP_DTSAIDA": "Data Saída/Alta",
+        "SP_GESTOR": "Gestor Responsável", "SP_MM": "Mês Competência", "SP_NAIH": "Número AIH",
+        "SP_NF": "Nota Fiscal", "SP_NUM_PR": "Documento Profissional", "SP_PROCREA": "Procedimento Realizado",
+        "SP_PTSP": "Pontos Serviço", "SP_QTD_ATO": "Quantidade do Ato", "SP_TIPO": "Tipo de Documento",
+        "SP_TP_ATO": "Tipo de Ato", "SP_UF": "UF Internação", "SP_VALATO": "Valor Pago (R$)"
+    },
+    "SINASC": {
+        "APGAR1": "Apgar 1º Minuto", "APGAR5": "Apgar 5º Minuto", "CODANOMAL": "CID Anomalia",
+        "CODBAINASC": "Bairro Nascimento", "CODMUNNASC": "Município Nascimento", "CODBAIRES": "Bairro Residência Mãe",
+        "CODMUNRES": "Município Residência Mãe", "CODESTAB": "Código Maternidade (CNES)", "CODOCUPMAE": "Ocupação Mãe",
+        "CONSULTAS": "Consultas Pré-Natal", "contador": "ID Registro", "DTCADASTRO": "Data Cadastro",
+        "DTRECEBIM": "Data Recebimento", "DTNASC": "Data Nascimento", "ESCMAE": "Escolaridade Mãe",
+        "ESTCIVMAE": "Estado Civil Mãe", "GESTACAO": "Semanas Gestação", "GRAVIDEZ": "Tipo Gravidez",
+        "HORANASC": "Hora Nascimento", "IDADEMAE": "Idade Mãe", "IDANOMAL": "Anomalia Congênita",
+        "LOCNASC": "Local Nascimento", "PARTO": "Tipo Parto", "PESO": "Peso (g)",
+        "QTDFILMORT": "Filhos Mortos Anteriores", "QTDFILVIVO": "Filhos Vivos Anteriores",
+        "RACACOR": "Raça/Cor Bebê", "SEXO": "Sexo Bebê", "UFINFORM": "UF Informante"
+    },
+    "CNES": {
+        "ATEND_PR": "Possui Pronto-Socorro", "ATIVIDAD": "Atividade Ensino/Pesquisa", "CLIENTEL": "Fluxo Clientela",
+        "CNES": "Código CNES", "CNPJ_MAN": "CNPJ Mantenedora", "CODUFMUN": "Município (IBGE)",
+        "COMPETEN": "Competência (AAAAMM)", "CPF_CNPJ": "CPF/CNPJ Estabelecimento", "ESFERA_A": "Esfera Administrativa",
+        "NATUREZA": "Natureza Jurídica", "NIV_HIER": "Nível Hierarquia", "PF_PJ": "PF ou PJ",
+        "TPGESTAO": "Tipo Gestão", "TP_PREST": "Tipo Prestador", "TP_UNID": "Tipo Unidade",
+        "TURNO_AT": "Turno Atendimento", "VINC_SUS": "Atende SUS"
+    }
+}
+
+def tratar_e_traduzir_df(df, sistema):
     df_tratado = df.copy()
     sigla_sistema = "SIM" if "SIM" in sistema else "SINASC" if "SINASC" in sistema else "SIH" if "SIH" in sistema else "CNES"
     
-    dict_sistema = DICIONARIOS.get(sigla_sistema, {})
-    
-    # Aplica as traduções criando colunas novas com o sufixo _DESC
-    for coluna, de_para in dict_sistema.items():
+    # 1. Traduzir os Valores das linhas
+    dict_valores = DICIONARIOS_VALORES.get(sigla_sistema, {})
+    for coluna, de_para in dict_valores.items():
         if coluna in df_tratado.columns:
-            # Mantém a original e cria a nova
-            df_tratado[f"{coluna}_DESC"] = df_tratado[coluna].astype(str).map(de_para).fillna("Não informado/Ignorado")
+            df_tratado[coluna] = df_tratado[coluna].astype(str).map(de_para).fillna(df_tratado[coluna])
             
+    # 2. Renomear os Cabeçalhos
+    dict_cabecalhos = TRADUCAO_CABECALHOS.get(sigla_sistema, {})
+    df_tratado = df_tratado.rename(columns=dict_cabecalhos)
+    
     return df_tratado
 
 # --- CONECTORES DE DADOS ---
 
 @st.cache_data
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes=None):
-    if not sim: return pd.DataFrame({"Erro": ["PySUS não instalado/disponível."]})
+    if not sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     
     df_final = pd.DataFrame()
     for uf in ufs_lista:
@@ -119,7 +170,6 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes=None):
             else: # CNES
                 res = cnes(state=uf, year=ano, month=mes)
             
-            # Alguns retornos do PySUS são listas de arquivos
             if isinstance(res, list) and len(res) > 0:
                 df_uf = pd.read_parquet(res[0])
             elif not isinstance(res, list) and res is not None:
@@ -128,34 +178,24 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes=None):
                 continue
                 
             df_final = pd.concat([df_final, df_uf], ignore_index=True)
-            
-        except Exception as e:
+        except Exception:
             continue
             
     if df_final.empty:
-        return pd.DataFrame({"Erro": [f"Dados ainda não disponíveis para o período e região selecionados."]})
+        return pd.DataFrame({"Erro": ["Dados ainda não disponíveis no servidor federal para este período."]})
     return df_final
-
-def baixar_excel(df):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Dados')
-    return output.getvalue()
 
 # --- INTERFACE ---
 
 st.markdown('<div class="header-sidra"><h1>Central de Inteligência Territorial</h1><p>SIDRA + DATASUS + VIS DATA 3</p></div>', unsafe_allow_html=True)
 
-# 1. Filtros Principais (Sidebar)
 st.sidebar.title("Filtros de Pesquisa")
 
 fonte = st.sidebar.radio("Base de Informação:", ["🏥 Saúde (DATASUS)", "🏠 Social (VIS DATA 3)"])
 nivel_terr = st.sidebar.radio("Nível Territorial:", ["Brasil", "Estado", "Município"])
 
-municipios_dict = buscar_municipios()
-
 ufs_selecionadas = UFS
-id_ibge_alvo = "1" # Código IBGE Brasil
+id_ibge_alvo = "1" 
 
 if nivel_terr == "Estado":
     uf_sel = st.sidebar.selectbox("Selecione o Estado:", sorted(UFS))
@@ -164,7 +204,7 @@ if nivel_terr == "Estado":
     nome_local = uf_sel
 elif nivel_terr == "Município":
     uf_sel = st.sidebar.selectbox("Filtrar Estado:", sorted(UFS), index=UFS.index("MG"))
-    muns_estado = {k: v for k, v in municipios_dict.items() if v['uf'] == uf_sel}
+    muns_estado = buscar_municipios_por_uf(uf_sel) # Carrega só o estado selecionado (MUITO MAIS RÁPIDO)
     
     mun_nome = st.sidebar.selectbox("Selecione o Município:", sorted(muns_estado.keys()))
     dados_mun = muns_estado[mun_nome]
@@ -179,10 +219,7 @@ else:
 
 if fonte == "🏥 Saúde (DATASUS)":
     sistema = st.sidebar.selectbox("Sistema:", [
-        "Mortalidade (SIM)", 
-        "Internações (SIH-SP)", 
-        "Nascimentos (SINASC)", 
-        "Estabelecimentos (CNES)"
+        "Mortalidade (SIM)", "Internações (SIH-SP)", "Nascimentos (SINASC)", "Estabelecimentos (CNES)"
     ])
     
     ano_sel = st.sidebar.selectbox("Ano de Referência:", listar_anos_disponiveis())
@@ -192,80 +229,89 @@ if fonte == "🏥 Saúde (DATASUS)":
         nome_mes = st.sidebar.selectbox("Mês de Competência:", list(MESES.keys()))
         mes_sel = MESES[nome_mes]
     
-    if st.button(f"Consultar {sistema}"):
-        if nivel_terr == "Brasil":
-            st.warning("⚠️ Consultar o Brasil inteiro no DATASUS em tempo real pode demorar. Processando...")
-            
-        with st.spinner(f"Baixando base de {ano_sel}..."):
+    if st.button(f"🔍 Consultar Base"):
+        with st.spinner(f"Extraindo dados do Datasus para {nome_local} em {ano_sel}..."):
             df_bruto = buscar_datasus_v7(sistema, ufs_selecionadas, ano_sel, mes_sel)
             
             if not df_bruto.empty and "Erro" not in df_bruto.columns:
                 
-                # Filtro Municipal se aplicável
+                # Filtro territorial preciso
                 if nivel_terr == "Município":
                     col_map = {
-                        "Mortalidade (SIM)": "CODMUNRES", 
-                        "Internações (SIH-SP)": "SP_GESTOR", # No SIH-SP geralmente usamos o gestor ou hospital
-                        "Nascimentos (SINASC)": "CODMUNRES", 
-                        "Estabelecimentos (CNES)": "CODUFMUN"
+                        "Mortalidade (SIM)": "CODMUNRES", "Internações (SIH-SP)": "SP_GESTOR",
+                        "Nascimentos (SINASC)": "CODMUNRES", "Estabelecimentos (CNES)": "CODUFMUN"
                     }
-                    coluna_filtro = col_map.get(sistema)
-                    if coluna_filtro in df_bruto.columns:
-                        df_bruto = df_bruto[df_bruto[coluna_filtro].astype(str).str.startswith(id_datasus_alvo)]
+                    col_filtro = col_map.get(sistema)
+                    if col_filtro in df_bruto.columns:
+                        df_bruto = df_bruto[df_bruto[col_filtro].astype(str).str.startswith(id_datasus_alvo)]
                 
-                df_tratado = aplicar_dicionarios(df_bruto, sistema)
+                # Gera as duas versões independentes
+                df_tratado = tratar_e_traduzir_df(df_bruto, sistema)
                 
-                st.subheader(f"📊 {sistema} - {nome_local} ({ano_sel})")
-                st.markdown(f'<div class="metric-card"><h4>Registros Encontrados</h4><h2>{len(df_bruto)}</h2></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="metric-card"><h2>{len(df_bruto)} Registros Encontrados</h2><p>{sistema} - {nome_local} ({ano_sel})</p></div>', unsafe_allow_html=True)
                 
-                tab1, tab2 = st.tabs(["📋 Dados Tratados (Recomendado)", "⚙️ Dados Brutos (Originais)"])
+                st.info("💡 Apenas as primeiras 100 linhas são exibidas na tela para o navegador não travar. Os botões de download exportam a base completa.")
                 
-                with tab1:
-                    st.dataframe(df_tratado, width='stretch', height=400)
-                    col1, col2 = st.columns(2)
-                    col1.download_button("📥 Baixar Tratado (CSV)", df_tratado.to_csv(index=False, sep=';', decimal=','), f"tratado_{sistema}.csv", "text/csv")
-                    col2.download_button("📥 Baixar Tratado (Excel)", baixar_excel(df_tratado), f"tratado_{sistema}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                col1, col2 = st.columns(2)
                 
-                with tab2:
-                    st.dataframe(df_bruto, width='stretch', height=400)
-                    col3, col4 = st.columns(2)
-                    col3.download_button("📥 Baixar Bruto (CSV)", df_bruto.to_csv(index=False, sep=';', decimal=','), f"bruto_{sistema}.csv", "text/csv")
-                    col4.download_button("📥 Baixar Bruto (Excel)", baixar_excel(df_bruto), f"bruto_{sistema}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                # Interface lado a lado (resolve o problema da "aba escondida")
+                with col1:
+                    st.subheader("✅ Planilha Tratada")
+                    st.caption("Cabeçalhos renomeados e códigos descritos.")
+                    st.dataframe(df_tratado.head(100), use_container_width=True)
+                    st.download_button(
+                        label="📥 Baixar Dados TRATADOS",
+                        data=df_tratado.to_csv(index=False, sep=';', decimal=','),
+                        file_name=f"tratado_{sistema}_{nome_local}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
 
+                with col2:
+                    st.subheader("⚙️ Planilha Bruta")
+                    st.caption("Formato original, direto do FTP Ministério da Saúde.")
+                    st.dataframe(df_bruto.head(100), use_container_width=True)
+                    st.download_button(
+                        label="📥 Baixar Dados BRUTOS",
+                        data=df_bruto.to_csv(index=False, sep=';', decimal=','),
+                        file_name=f"bruto_{sistema}_{nome_local}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
             else:
-                msg = df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Dados não localizados para este período."
-                st.error(msg)
+                st.error(df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados.")
 
 else:
-    # Lógica VIS DATA 3 (MDS)
+    # Correção Robusta VIS DATA 3
     st.subheader(f"🏠 Indicadores Sociais - {nome_local}")
-    st.info("A base do VIS DATA 3 extrai indicadores sociais diretos do Ministério do Desenvolvimento Social.")
+    st.info("Conectando ao sistema VIS DATA 3 (MDS / SAGICAD).")
     
-    if st.button("Consultar MDS"):
-        with st.spinner("Conectando ao VIS DATA 3..."):
-            # A API do MDS recebe o código IBGE (2 dígitos estado, 7 dígitos município)
+    if st.button("🔍 Extrair Tabelas MDS"):
+        with st.spinner("Ultrapassando protocolos do servidor federal..."):
             url_mds = f"https://aplicacoes.cidadania.gov.br/vis/data3/v.php?ibge={id_ibge_alvo}"
+            # Disfarce para não ser bloqueado pela API do Governo
+            headers_mds = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'}
             
             try:
-                res = requests.get(url_mds, timeout=20)
+                # verify=False força a conexão mesmo se o certificado do governo estiver vencido
+                res = requests.get(url_mds, headers=headers_mds, timeout=15, verify=False)
                 tabelas = pd.read_html(io.StringIO(res.text))
                 
                 if len(tabelas) == 0:
-                    st.warning("Nenhuma tabela encontrada nesta consulta.")
+                    st.warning("Nenhum dado social foi retornado para este município.")
                 else:
                     for i, t in enumerate(tabelas):
-                        with st.expander(f"Tabela {i+1}", expanded=(i==0)):
-                            st.dataframe(t)
-                            
-                            # Opção de baixar tabelas do MDS
-                            st.download_button(
-                                f"📥 Baixar Tabela {i+1} (CSV)", 
-                                t.to_csv(index=False, sep=';'), 
-                                f"mds_tab{i+1}_{id_ibge_alvo}.csv", 
-                                key=f"mds_btn_{i}"
-                            )
+                        st.write(f"**Tabela {i+1}**")
+                        st.dataframe(t, use_container_width=True)
+                        st.download_button(
+                            label=f"📥 Baixar Tabela {i+1}", 
+                            data=t.to_csv(index=False, sep=';'), 
+                            file_name=f"mds_tabela_{i+1}_{id_ibge_alvo}.csv", 
+                            mime="text/csv",
+                            key=f"btn_{i}"
+                        )
             except Exception as e:
-                st.error("Falha ao conectar com o MDS. Verifique a disponibilidade do serviço federal.")
+                st.error("O servidor do Ministério (VIS DATA) encontra-se fora do ar ou bloqueou a conexão no momento. Tente novamente mais tarde.")
 
 st.divider()
-st.caption("Dados atualizados conforme disponibilidade nos servidores oficiais (FTP DATASUS / SAGI MDS). A ferramenta preserva os microdados originais e expande os metadados.")
+st.caption("Sistema Otimizado. Para bases pesadas (acima de 100.000 linhas), aguarde o botão de download preparar o arquivo.")
