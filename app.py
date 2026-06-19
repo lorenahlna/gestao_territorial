@@ -19,11 +19,11 @@ st.markdown("""
 
 # --- CARREGAMENTO DE METADADOS ---
 
-@st.cache_data
+@st.cache_data(show_spinner=False)
 def get_municipios_base():
     url = "https://servicodados.ibge.gov.br/api/v1/localidades/municipios"
     try:
-        res = requests.get(url).json()
+        res = requests.get(url, timeout=10).json()
         df = pd.DataFrame([{
             "nome": m['nome'],
             "uf": m['microrregiao']['mesorregiao']['UF']['sigla'],
@@ -31,9 +31,11 @@ def get_municipios_base():
             "datasus6": str(m['id'])[:6],
             "label": f"{m['nome']} - {m['microrregiao']['mesorregiao']['UF']['sigla']}"
         } for m in res])
-        return df
-    except:
-        return pd.DataFrame([{"nome": "Belo Horizonte", "uf": "MG", "ibge7": "3106200", "datasus6": "310620", "label": "Belo Horizonte - MG"}])
+        return df, True # Retorna o DataFrame e um status de Sucesso
+    except Exception as e:
+        # Fallback de segurança em caso de falha da API do IBGE
+        df_fallback = pd.DataFrame([{"nome": "Belo Horizonte", "uf": "MG", "ibge7": "3106200", "datasus6": "310620", "label": "Belo Horizonte - MG"}])
+        return df_fallback, False # Retorna o DataFrame de fallback e status de Falha
 
 # --- DICIONÁRIOS DE TRATAMENTO ---
 DICIONARIOS = {
@@ -56,8 +58,10 @@ DICIONARIOS = {
 
 try:
     from pysus.api._impl.databases import sim, sih, cnes, sinasc
+    pysus_disponivel = True
 except ImportError:
     sim = sih = cnes = sinasc = None
+    pysus_disponivel = False
 
 def tratar_dados(df, sistema_key):
     if sistema_key in DICIONARIOS:
@@ -67,9 +71,9 @@ def tratar_dados(df, sistema_key):
                 df[f"{col}_DESC"] = df[col].astype(str).map(mapeamento).fillna("Não Informado")
     return df
 
-@st.cache_data
+@st.cache_data(show_spinner=False)
 def buscar_datasus_v8(sistema, uf, ano, mun_id, tipo_territorio):
-    if not sim: return pd.DataFrame()
+    if not sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não instalada."]})
     try:
         if sistema == "SIM": res = sim(state=uf, year=ano)
         elif sistema == "SIH": res = sih(state=uf, year=ano, month=1)
@@ -78,7 +82,7 @@ def buscar_datasus_v8(sistema, uf, ano, mun_id, tipo_territorio):
         
         df = pd.read_parquet(res[0]) if isinstance(res, list) else res
         
-        if tipo_territorio == "Município":
+        if tipo_territorio == "Município" and mun_id:
             col_map = {"SIM": "CODMUNRES", "SIH": "MUNIC_RES", "SINASC": "CODMUNRES", "CNES": "CODUFMUN"}
             col = col_map.get(sistema)
             if col in df.columns:
@@ -91,7 +95,16 @@ def buscar_datasus_v8(sistema, uf, ano, mun_id, tipo_territorio):
 
 st.markdown('<div class="header-sidra"><h1>Central de Inteligência Territorial</h1><p>Relatórios Oficiais de Saúde e Social</p></div>', unsafe_allow_html=True)
 
-df_mun_base = get_municipios_base()
+# Verifica se a biblioteca pysus carregou corretamente
+if not pysus_disponivel:
+    st.error("⚠️ Biblioteca PySUS não encontrada. Certifique-se de instalar com: pip install pysus")
+
+# Carrega os municípios e verifica se a API do IBGE respondeu bem
+with st.spinner("Carregando base de municípios do Brasil..."):
+    df_mun_base, ibge_sucesso = get_municipios_base()
+
+if not ibge_sucesso:
+    st.warning("⚠️ Instabilidade na API do IBGE detectada. Operando em modo de segurança (Apenas dados locais de fallback).")
 
 with st.sidebar:
     st.header("Configurações")
@@ -101,14 +114,25 @@ with st.sidebar:
     
     # Territorial
     territorio = st.selectbox("Nível Territorial:", ["Estado", "Município"])
-    uf_sel = st.selectbox("UF:", sorted(df_mun_base['uf'].unique()), index=10) # MG default
+    
+    # --- CORREÇÃO APLICADA AQUI ---
+    opcoes_uf = sorted(df_mun_base['uf'].unique())
+    try:
+        # Tenta definir MG como padrão se existir na lista
+        indice_padrao = opcoes_uf.index("MG")
+    except ValueError:
+        # Se a API falhar e retornar menos itens, ou MG não estiver, usa o primeiro item (0)
+        indice_padrao = 0
+        
+    uf_sel = st.selectbox("UF:", opcoes_uf, index=indice_padrao)
     
     mun_sel_id = None
     if territorio == "Município":
         lista_mun_uf = df_mun_base[df_mun_base['uf'] == uf_sel]
         nome_mun = st.selectbox("Município:", lista_mun_uf['label'])
-        mun_sel_id = lista_mun_uf[lista_mun_uf['label'] == nome_mun]['ibge7'].values[0]
-        st.caption(f"Código IBGE: {mun_sel_id}")
+        if not lista_mun_uf.empty:
+            mun_sel_id = lista_mun_uf[lista_mun_uf['label'] == nome_mun]['ibge7'].values[0]
+            st.caption(f"Código IBGE: {mun_sel_id}")
 
     st.divider()
     
@@ -121,44 +145,51 @@ with st.sidebar:
 # --- EXECUÇÃO ---
 
 if fonte == "🏥 DATASUS":
-    st.subheader(f"📊 Relatório {sistema} - {uf_sel} " + (f"({nome_mun})" if territorio == "Município" else ""))
+    texto_localidade = f"({nome_mun})" if territorio == "Município" and 'nome_mun' in locals() else ""
+    st.subheader(f"📊 Relatório {sistema} - {uf_sel} {texto_localidade}")
     
     if st.button(f"Gerar Relatório {sistema}"):
-        with st.spinner("Buscando dados..."):
+        with st.spinner(f"Buscando dados do {sistema} para {uf_sel} no ano {ano}... isso pode levar alguns minutos."):
             df_bruto = buscar_datasus_v8(sistema, uf_sel, ano, mun_sel_id, territorio)
             
             if not df_bruto.empty and "Erro" not in df_bruto.columns:
                 df_tratado = tratar_dados(df_bruto.copy(), sistema)
                 
                 c1, c2 = st.columns(2)
-                c1.markdown(f'<div class="metric-card"><h4>Registros Brutos</h4><h2>{len(df_bruto)}</h2></div>', unsafe_allow_html=True)
+                c1.markdown(f'<div class="metric-card"><h4>Registros Encontrados</h4><h2>{len(df_bruto)}</h2></div>', unsafe_allow_html=True)
                 
                 st.tabs_dados = st.tabs(["📋 Dados Tratados", "📂 Dados Brutos"])
                 
                 with st.tabs_dados[0]:
-                    st.dataframe(df_tratado.head(5000), width='stretch')
-                    st.download_button("📥 Baixar Tratado (CSV)", df_tratado.to_csv(index=False), "tratado.csv")
+                    st.dataframe(df_tratado.head(5000), use_container_width=True)
+                    st.download_button("📥 Baixar Tratado (CSV)", df_tratado.to_csv(index=False).encode('utf-8'), f"{sistema}_{uf_sel}_{ano}_tratado.csv", "text/csv")
                 
                 with st.tabs_dados[1]:
-                    st.dataframe(df_bruto.head(5000), width='stretch')
-                    st.download_button("📥 Baixar Bruto (CSV)", df_bruto.to_csv(index=False), "bruto.csv")
+                    st.dataframe(df_bruto.head(5000), use_container_width=True)
+                    st.download_button("📥 Baixar Bruto (CSV)", df_bruto.to_csv(index=False).encode('utf-8'), f"{sistema}_{uf_sel}_{ano}_bruto.csv", "text/csv")
             else:
-                st.error("Erro ou dados não disponíveis para este período/UF.")
+                erro_msg = df_bruto["Erro"].iloc[0] if "Erro" in df_bruto.columns else "Nenhum dado encontrado para os parâmetros selecionados."
+                st.error(f"Erro ou dados não disponíveis: {erro_msg}")
 
 else:
     st.subheader(f"🏠 Indicadores Sociais (VIS DATA 3) - {uf_sel}")
-    if territorio == "Município":
+    if territorio == "Município" and mun_sel_id:
         if st.button("Consultar MDS"):
-            with st.spinner("Acessando SAGI/MDS..."):
+            with st.spinner("Acessando bases do SAGI/MDS..."):
                 url = f"https://aplicacoes.cidadania.gov.br/vis/data3/v.php?ibge={mun_sel_id}"
                 try:
                     res = requests.get(url, timeout=15)
                     tabelas = pd.read_html(io.StringIO(res.text))
-                    for i, t in enumerate(tabelas):
-                        with st.expander(f"Tabela de Indicadores {i+1}"):
-                            st.table(t)
-                except:
-                    st.error("Portal do MDS instável ou código não encontrado.")
+                    
+                    if tabelas:
+                        st.success(f"Encontradas {len(tabelas)} tabelas de indicadores.")
+                        for i, t in enumerate(tabelas):
+                            with st.expander(f"Tabela de Indicadores {i+1}"):
+                                st.dataframe(t, use_container_width=True)
+                    else:
+                        st.warning("Nenhuma tabela encontrada nesta página.")
+                except Exception as e:
+                    st.error("Portal do MDS instável ou dados não encontrados para este município.")
     else:
         st.info("A consulta por Estado no VIS DATA 3 requer agregação manual ou acesso a painéis específicos. Utilize o nível 'Município' para dados detalhados.")
 
