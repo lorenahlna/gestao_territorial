@@ -112,47 +112,76 @@ def tratar_e_traduzir_df(df, sistema):
     df_tratado = df_tratado.rename(columns=TRADUCAO_CABECALHOS.get(sigla_sistema, {}))
     return df_tratado
 
-# --- MOTOR DATASUS COM OTIMIZADOR DE MEMÓRIA (TRAVA DE MESES REMOVIDA) ---
+# --- MOTOR DATASUS COM RADAR DE COLUNAS E DETECTOR DE FALHAS ---
 
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Brasil", id_datasus_alvo=""):
     if not sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     
-    # A TRAVA FOI REMOVIDA DAQUI CONFORME SOLICITADO
-
     df_final = pd.DataFrame()
     meses_para_baixar = [mes_num] if mes_num else list(range(1, 13))
 
-    col_map = {
-        "Mortalidade (SIM)": "CODMUNRES", 
-        "Internações (SIH)": "MUNIC_RES",
-        "Nascimentos (SINASC)": "CODMUNRES", 
-        "Cadastro Nacional de Estabelecimentos (CNES)": "CODUFMUN", 
-        "Notificações (SINAN)": "ID_MN_RESI"
+    # 📡 RADAR DE COLUNAS: Acha o nome da coluna independente do bloco do SIH/SINAN
+    col_map_possiveis = {
+        "Mortalidade (SIM)": ["CODMUNRES", "codmunres"], 
+        "Internações (SIH)": ["MUNIC_RES", "munic_res", "SP_GESTOR", "sp_gestor", "SP_MUNIC", "sp_munic", "MUNIC_MOV", "munic_mov"],
+        "Nascimentos (SINASC)": ["CODMUNRES", "codmunres"], 
+        "Cadastro Nacional de Estabelecimentos (CNES)": ["CODUFMUN", "codufmun"], 
+        "Notificações (SINAN)": ["ID_MN_RESI", "id_mn_resi", "ID_MUNICIP", "id_municip"]
     }
-    
-    if sistema == "Internações (SIH)" and sih_grupo == "SP":
-        col_filtro = "SP_GESTOR"
-    else:
-        col_filtro = col_map.get(sistema)
+    cols_alvo = col_map_possiveis.get(sistema, [])
+
+    dt_cols_map = {
+        "Mortalidade (SIM)": ["DTOBITO", "dtobito"],
+        "Nascimentos (SINASC)": ["DTNASC", "dtnasc"],
+        "Notificações (SINAN)": ["DT_NOTIFIC", "dt_notific"]
+    }
+    dt_alvos = dt_cols_map.get(sistema, [])
 
     sinan_baixado = False
+    falhas_conexao = 0
+    sucessos_download = 0
 
     for uf in ufs_lista:
         try:
             resultados = []
             
-            # Baixa os caminhos dos arquivos do FTP
+            # BLOCO BLINDADO DE DOWNLOAD
             if "SIH" in sistema or "CNES" in sistema:
                 for m in meses_para_baixar:
-                    try:
-                        if "SIH" in sistema:
-                            res = sih(state=uf, year=ano, month=m, group=sih_grupo)
-                        elif "CNES" in sistema:
-                            res = cnes(state=uf, year=ano, month=m, group=cnes_grupo)
-                            
-                        if isinstance(res, list): resultados.extend(res)
-                        elif res is not None: resultados.append(res)
-                    except: continue
+                    # SIH Download Fallback
+                    if "SIH" in sistema:
+                        try:
+                            res = sih(state=uf, year=ano, month=m, groups=[sih_grupo])
+                        except:
+                            try:
+                                res = sih(state=uf, year=ano, month=m, group=sih_grupo)
+                            except:
+                                try:
+                                    res = sih(state=uf, year=ano, month=m)
+                                except:
+                                    falhas_conexao += 1
+                                    continue
+                    # CNES Download Fallback
+                    elif "CNES" in sistema:
+                        try:
+                            res = cnes(state=uf, year=ano, month=m, groups=[cnes_grupo])
+                        except:
+                            try:
+                                res = cnes(state=uf, year=ano, month=m, group=cnes_grupo)
+                            except:
+                                try:
+                                    res = cnes(state=uf, year=ano, month=m)
+                                except:
+                                    falhas_conexao += 1
+                                    continue
+                    
+                    if isinstance(res, list): 
+                        resultados.extend(res)
+                        sucessos_download += 1
+                    elif res is not None: 
+                        resultados.append(res)
+                        sucessos_download += 1
+            
             else:
                 try:
                     if sistema == "Mortalidade (SIM)": res = sim(state=uf, year=ano)
@@ -166,11 +195,17 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                             res = sinan(disease=agravo, state=uf, year=ano)
                         sinan_baixado = True
                     
-                    if isinstance(res, list): resultados.extend(res)
-                    elif res is not None: resultados.append(res)
-                except: continue
+                    if isinstance(res, list): 
+                        resultados.extend(res)
+                        sucessos_download += 1
+                    elif res is not None: 
+                        resultados.append(res)
+                        sucessos_download += 1
+                except:
+                    falhas_conexao += 1
+                    continue
             
-            # Lê cada arquivo um por um e FILTRA IMEDIATAMENTE
+            # LÊ, FILTRA E DESCARTA
             for r in resultados:
                 try:
                     if isinstance(r, pd.DataFrame): df_temp = r.copy()
@@ -178,24 +213,37 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                     elif isinstance(r, str): df_temp = pd.read_parquet(r)
                     else: continue
                     
-                    if sistema == "Notificações (SINAN)" and nivel_terr in ["Estado", "Município"] and col_filtro in df_temp.columns:
+                    # 📡 RADAR ATIVADO: Acha o nome real da coluna dentro deste arquivo específico
+                    col_filtro_real = None
+                    for c in df_temp.columns:
+                        if str(c).upper() in [x.upper() for x in cols_alvo]:
+                            col_filtro_real = c
+                            break
+
+                    dt_col_real = None
+                    for c in df_temp.columns:
+                        if str(c).upper() in [x.upper() for x in dt_alvos]:
+                            dt_col_real = c
+                            break
+                    
+                    # Filtra SINAN Nacional pro Estado
+                    if sistema == "Notificações (SINAN)" and nivel_terr in ["Estado", "Município"] and col_filtro_real:
                         codigo_uf_ibge = ESTADOS_IBGE.get(uf, "")
-                        df_temp = df_temp[df_temp[col_filtro].astype(str).str.startswith(codigo_uf_ibge)]
+                        df_temp = df_temp[df_temp[col_filtro_real].astype(str).str.startswith(codigo_uf_ibge)]
                     
-                    if nivel_terr == "Município" and col_filtro and col_filtro in df_temp.columns:
-                        df_temp[col_filtro] = df_temp[col_filtro].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-                        df_temp = df_temp[df_temp[col_filtro].str.startswith(id_datasus_alvo)]
+                    # Filtra Município Exato
+                    if nivel_terr == "Município" and col_filtro_real:
+                        df_temp[col_filtro_real] = df_temp[col_filtro_real].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+                        df_temp = df_temp[df_temp[col_filtro_real].str.startswith(id_datasus_alvo)]
                     
-                    if mes_num is not None and sistema in ["Mortalidade (SIM)", "Nascimentos (SINASC)", "Notificações (SINAN)"]:
+                    # Filtra Mês Exato
+                    if mes_num is not None and dt_col_real:
                         mes_str = str(mes_num).zfill(2)
-                        if sistema == "Mortalidade (SIM)" and "DTOBITO" in df_temp.columns:
-                            df_temp["DTOBITO"] = df_temp["DTOBITO"].astype(str).str.replace(r'\.0$', '', regex=True).str.zfill(8)
-                            df_temp = df_temp[df_temp["DTOBITO"].str[2:4] == mes_str]
-                        elif sistema == "Nascimentos (SINASC)" and "DTNASC" in df_temp.columns:
-                            df_temp["DTNASC"] = df_temp["DTNASC"].astype(str).str.replace(r'\.0$', '', regex=True).str.zfill(8)
-                            df_temp = df_temp[df_temp["DTNASC"].str[2:4] == mes_str]
-                        elif sistema == "Notificações (SINAN)" and "DT_NOTIFIC" in df_temp.columns:
-                            dt_notific_limpa = df_temp["DT_NOTIFIC"].astype(str).str.replace("-", "").str.replace(r'\.0$', '', regex=True)
+                        if sistema in ["Mortalidade (SIM)", "Nascimentos (SINASC)"]:
+                            df_temp[dt_col_real] = df_temp[dt_col_real].astype(str).str.replace(r'\.0$', '', regex=True).str.zfill(8)
+                            df_temp = df_temp[df_temp[dt_col_real].str[2:4] == mes_str]
+                        elif sistema == "Notificações (SINAN)":
+                            dt_notific_limpa = df_temp[dt_col_real].astype(str).str.replace("-", "").str.replace(r'\.0$', '', regex=True)
                             df_temp = df_temp[dt_notific_limpa.str[4:6] == mes_str]
                     
                     if not df_temp.empty:
@@ -212,8 +260,12 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                 
         except Exception: continue
             
+    # DIAGNÓSTICO EXATO DE ERRO PARA O USUÁRIO
     if df_final.empty:
-        return pd.DataFrame({"Erro": ["O Datasus não retornou dados. Verifique a existência de registros ou se os filtros inseridos são válidos no DATASUS."] })
+        if sucessos_download == 0 and falhas_conexao > 0:
+            return pd.DataFrame({"Erro": ["🛑 FALHA DE CONEXÃO: O servidor do FTP do DATASUS recusou o download ou os arquivos não existem para esse grupo/período."]})
+        else:
+            return pd.DataFrame({"Erro": ["⚠️ FALTA DE DADOS: O download foi realizado com sucesso, mas a tabela ficou vazia. Não existem registros para este agravo no Município/Estado/Mês selecionado."]})
     
     return df_final.drop_duplicates()
 
@@ -227,8 +279,8 @@ fonte = st.sidebar.radio("Base de Informação:", ["🏥 Saúde (DATASUS)", "�
 nivel_terr = st.sidebar.radio("Nível Territorial:", ["Brasil", "Estado", "Município"])
 
 ufs_selecionadas = UFS
-id_ibge_alvo = "1"
-id_datasus_alvo = "" # 🛠️ CORREÇÃO DO NAMEERROR: Variável inicializada aqui para não quebrar no fluxo 'Estado'
+id_ibge_alvo = "1" 
+id_datasus_alvo = ""
 
 if nivel_terr == "Estado":
     uf_sel = st.sidebar.selectbox("Selecione o Estado:", sorted(UFS))
@@ -246,7 +298,6 @@ elif nivel_terr == "Município":
     nome_local = mun_nome
 else:
     nome_local = "Brasil"
-    id_datasus_alvo = ""
 
 if fonte == "🏥 Saúde (DATASUS)":
     sistema = st.sidebar.selectbox("Sistema:", [
@@ -262,7 +313,33 @@ if fonte == "🏥 Saúde (DATASUS)":
     cnes_grupo_sel = None
     
     if sistema == "Notificações (SINAN)":
-        mapa_doencas = {"AIDS": "AIDS", "Câncer Relacionado ao Trabalho": "CANC", "Chikungunya": "CHIK", "Dengue": "DENG", "Doença de Chagas": "CHAG", "Leptospirose": "LEPT", "Meningite": "MENI", "Perda Auditiva por Ruído (Trabalho)": "PAIR", "Raiva Humana": "RAIV", "Sífilis Adquirida": "SIFA", "Sífilis Congênita": "SIFC", "Sífilis em Gestante": "SIFG", "Transtornos Mentais (Trabalho)": "MENT", "Tuberculose": "TUBE", "Varicela": "VARI", "Zika Vírus": "ZIKA"}
+        # 🌟 LISTA COMPLETA DOS SEUS PRINTS
+        mapa_doencas = {
+            "Acidente de trabalho": "ACGR",
+            "Acidente de trabalho com material biológico": "ACBI",
+            "AIDS em adultos": "AIDA",
+            "AIDS em crianças": "AIDC",
+            "Câncer Relacionado ao Trabalho": "CANC",
+            "Chikungunya": "CHIK",
+            "Dengue": "DENG",
+            "Doença de Chagas": "CHAG",
+            "Hepatites Virais": "HEPA",
+            "HIV em adultos": "HIVA",
+            "HIV em crianças": "HIVC",
+            "HIV em crianças expostas": "HIVE",
+            "Leptospirose": "LEPT",
+            "Meningite": "MENI",
+            "Perda Auditiva por Ruído (Trabalho)": "PAIR",
+            "Raiva Humana": "RAIV",
+            "Sífilis Adquirida": "SIFA",
+            "Sífilis Congênita": "SIFC",
+            "Sífilis em Gestante": "SIFG",
+            "Transtornos Mentais (Trabalho)": "MENT",
+            "Tuberculose": "TUBE",
+            "Varicela": "VARI",
+            "Violência doméstica, sexual e/ou outras": "VIOL",
+            "Zika Vírus": "ZIKA"
+        }
         nome_agravo = st.sidebar.selectbox("Doença/Agravo:", sorted(list(mapa_doencas.keys())))
         agravo_sel = mapa_doencas[nome_agravo]
         
@@ -327,7 +404,12 @@ if fonte == "🏥 Saúde (DATASUS)":
                     st.dataframe(df_bruto.head(100), use_container_width=True)
                     st.download_button("📥 Baixar BRUTOS", df_bruto.to_csv(index=False, sep=';', decimal=','), f"bruto_{sistema_titulo}_{nome_local}.csv", "text/csv", use_container_width=True)
             else:
-                st.error(df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados.")
+                # 🚨 EXIBE EXATAMENTE O DIAGNÓSTICO (FALTA DE DADOS OU QUEDA DO SERVIDOR)
+                mensagem_erro = df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados."
+                if "FALHA DE CONEXÃO" in mensagem_erro:
+                    st.error(mensagem_erro)
+                else:
+                    st.warning(mensagem_erro)
 
 else:
     st.subheader(f"🏠 Indicadores Sociais - {nome_local}")
