@@ -112,12 +112,11 @@ def tratar_e_traduzir_df(df, sistema):
     df_tratado = df_tratado.rename(columns=TRADUCAO_CABECALHOS.get(sigla_sistema, {}))
     return df_tratado
 
-# --- MOTOR DATASUS COM OTIMIZADOR DE MEMÓRIA (ANTI-QUEDAS) E SUPORTE A BLOCOS SIH ---
+# --- MOTOR DATASUS COM OTIMIZADOR DE MEMÓRIA (ANTI-QUEDAS) ---
 
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, nivel_terr="Brasil", id_datasus_alvo=""):
     if not sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     
-    # 🚨 TRAVA DE SEGURANÇA MANTIDA: Impede que o servidor Cloud trave com Bases Anuais Pesadas
     if "Internações (SIH" in sistema or sistema == "Estabelecimentos (CNES)":
         if mes_num is None:
             return pd.DataFrame({"Erro": ["🚨 TRAVA DE SEGURANÇA: As bases do SIH e CNES são gigantescas. Para evitar que o servidor trave por falta de memória RAM, por favor, selecione um 'Mês de Competência' específico na barra lateral em vez de 'Todos os Meses'."]})
@@ -125,13 +124,13 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, nivel_
     df_final = pd.DataFrame()
     meses_para_baixar = [mes_num] if mes_num else list(range(1, 13))
 
-    # MAPEAMENTO INTELIGENTE DAS COLUNAS BASEADO NO BLOCO
+    # MAPEAMENTO CORRIGIDO BASEADO NA DOCUMENTAÇÃO DO PYSUS
     col_map = {
         "Mortalidade (SIM)": "CODMUNRES", 
-        "Internações (SIH-RD) - AIH Reduzida": "MUNIC_RES", 
+        "Internações (SIH-RD) - Registros de Internações": "MUNIC_RES", 
         "Internações (SIH-SP) - Serviços Profissionais": "SP_GESTOR", 
-        "Internações (SIH-RJ) - AIH Rejeitadas": "MUNIC_RES",
-        "Internações (SIH-ER) - AIH Erros": "MUNIC_RES",
+        "Internações (SIH-ER) - Emergência Referenciada": "MUNIC_RES",
+        "Internações (SIH-CM) - Cirurgias Ambulatoriais": "MUNIC_RES",
         "Nascimentos (SINASC)": "CODMUNRES", 
         "Estabelecimentos (CNES)": "CODUFMUN", 
         "Notificações (SINAN)": "ID_MN_RESI"
@@ -149,7 +148,7 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, nivel_
                 for m in meses_para_baixar:
                     try:
                         if "SIH" in sistema:
-                            # 🧠 O SEGREDO DOS BLOCOS SIH AQUI: Ele extrai o RD, SP, RJ ou ER da string que o usuário clicou
+                            # Corta a string "Internações (SIH-XX) - ..." para pegar apenas as 2 letras do grupo (RD, SP, ER ou CM)
                             sih_group = sistema.split("(SIH-")[1][:2] 
                             res = sih(state=uf, year=ano, month=m, group=sih_group)
                         else:
@@ -175,7 +174,7 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, nivel_
                     elif res is not None: resultados.append(res)
                 except: continue
             
-            # Lê cada arquivo um por um, FILTRA IMEDIATAMENTE e joga o excesso fora
+            # Lê cada arquivo um por um e FILTRA IMEDIATAMENTE
             for r in resultados:
                 try:
                     if isinstance(r, pd.DataFrame): df_temp = r.copy()
@@ -187,12 +186,10 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, nivel_
                         codigo_uf_ibge = ESTADOS_IBGE.get(uf, "")
                         df_temp = df_temp[df_temp[col_filtro].astype(str).str.startswith(codigo_uf_ibge)]
                     
-                    # Filtra o Município rigorosamente antes de juntar (Economiza RAM drásticamente)
                     if nivel_terr == "Município" and col_filtro and col_filtro in df_temp.columns:
                         df_temp[col_filtro] = df_temp[col_filtro].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
                         df_temp = df_temp[df_temp[col_filtro].str.startswith(id_datasus_alvo)]
                     
-                    # Filtra o Mês antes de juntar (Bases Anuais)
                     if mes_num is not None and sistema in ["Mortalidade (SIM)", "Nascimentos (SINASC)", "Notificações (SINAN)"]:
                         mes_str = str(mes_num).zfill(2)
                         if sistema == "Mortalidade (SIM)" and "DTOBITO" in df_temp.columns:
@@ -208,14 +205,12 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, nivel_
                     if not df_temp.empty:
                         df_final = pd.concat([df_final, df_temp], ignore_index=True)
                     
-                    # 🧹 Limpeza agressiva de Memória após processar o lote
                     del df_temp
                     gc.collect()
                     
                 except Exception as e:
                     continue
                 
-            # Limpa as listas de resultados para a próxima UF
             del resultados
             gc.collect()
                 
@@ -257,13 +252,13 @@ else:
     id_datasus_alvo = ""
 
 if fonte == "🏥 Saúde (DATASUS)":
-    # 🌟 A NOVA DIVISÃO DO SIH EM BLOCOS ESTÁ AQUI 
+    # 🌟 MENU ATUALIZADO COM OS 4 BLOCOS DO SIH CONFORME A DOCUMENTAÇÃO
     sistema = st.sidebar.selectbox("Sistema:", [
         "Mortalidade (SIM)", 
-        "Internações (SIH-RD) - AIH Reduzida", 
+        "Internações (SIH-RD) - Registros de Internações", 
         "Internações (SIH-SP) - Serviços Profissionais",
-        "Internações (SIH-RJ) - AIH Rejeitadas",
-        "Internações (SIH-ER) - AIH Erros",
+        "Internações (SIH-ER) - Emergência Referenciada",
+        "Internações (SIH-CM) - Cirurgias Ambulatoriais",
         "Nascimentos (SINASC)", 
         "Estabelecimentos (CNES)", 
         "Notificações (SINAN)"
@@ -289,41 +284,4 @@ if fonte == "🏥 Saúde (DATASUS)":
                 df_tratado = tratar_e_traduzir_df(df_bruto, sistema)
                 agravo_titulo = f" ({nome_agravo})" if agravo_sel else ""
                 
-                # Se for do Grupo SIH, limpa a exibição visual removendo o texto longo
-                sistema_titulo = sistema.split(" - ")[0] if "SIH" in sistema else sistema
-                
-                st.markdown(f'<div class="metric-card"><h2>{len(df_bruto)} Registros Encontrados</h2><p>{sistema_titulo}{agravo_titulo} - {nome_local} ({ano_sel})</p></div>', unsafe_allow_html=True)
-                st.info("💡 Apenas as primeiras 100 linhas são exibidas. Use os botões para exportar a base completa.")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.subheader("✅ Planilha Tratada")
-                    st.dataframe(df_tratado.head(100), use_container_width=True)
-                    st.download_button("📥 Baixar TRATADOS", df_tratado.to_csv(index=False, sep=';', decimal=','), f"tratado_{sistema_titulo}_{nome_local}.csv", "text/csv", use_container_width=True)
-
-                with col2:
-                    st.subheader("⚙️ Planilha Bruta")
-                    st.dataframe(df_bruto.head(100), use_container_width=True)
-                    st.download_button("📥 Baixar BRUTOS", df_bruto.to_csv(index=False, sep=';', decimal=','), f"bruto_{sistema_titulo}_{nome_local}.csv", "text/csv", use_container_width=True)
-            else:
-                st.error(df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados.")
-
-else:
-    st.subheader(f"🏠 Indicadores Sociais - {nome_local}")
-    if st.button("🔍 Extrair Tabelas MDS"):
-        with st.spinner("Ultrapassando protocolos do servidor federal..."):
-            url_mds = f"https://aplicacoes.cidadania.gov.br/vis/data3/v.php?ibge={id_ibge_alvo}"
-            try:
-                res = requests.get(url_mds, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15, verify=False)
-                tabelas = pd.read_html(io.StringIO(res.text))
-                if not tabelas: st.warning("Nenhum dado social retornado.")
-                else:
-                    for i, t in enumerate(tabelas):
-                        st.write(f"**Tabela {i+1}**")
-                        st.dataframe(t, use_container_width=True)
-                        st.download_button(f"📥 Baixar Tabela {i+1}", t.to_csv(index=False, sep=';'), f"mds_tabela_{i+1}_{id_ibge_alvo}.csv", "text/csv", key=f"btn_{i}")
-            except:
-                st.error("O servidor do Ministério encontra-se fora do ar ou bloqueou a conexão. Tente mais tarde.")
-
-st.divider()
-st.caption("Sistema Otimizado com Garbage Collector. As bases de Internações (SIH) e Estabelecimentos (CNES) requerem filtro mensal obrigatório para proteger o servidor.")
+                sistema_titulo = sistema.split(" - ")[0] if "SIH" in sistema
