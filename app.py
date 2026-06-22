@@ -114,10 +114,11 @@ def tratar_e_traduzir_df(df, sistema):
 
 # --- MOTOR DATASUS COM OTIMIZADOR DE MEMÓRIA (ANTI-QUEDAS) ---
 
-def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, nivel_terr="Brasil", id_datasus_alvo=""):
+def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Brasil", id_datasus_alvo=""):
     if not sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     
-    if sistema in ["Internações (SIH)", "Estabelecimentos (CNES)"]:
+    # 🚨 TRAVA DE SEGURANÇA MANTIDA: Impede que o servidor Cloud trave com Bases Mensais Pesadas
+    if "SIH" in sistema or "CNES" in sistema:
         if mes_num is None:
             return pd.DataFrame({"Erro": ["🚨 TRAVA DE SEGURANÇA: As bases do SIH e CNES são gigantescas. Para evitar que o servidor trave por falta de memória RAM, por favor, selecione um 'Mês de Competência' específico na barra lateral em vez de 'Todos os Meses'."]})
 
@@ -126,13 +127,12 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
 
     col_map = {
         "Mortalidade (SIM)": "CODMUNRES", 
-        "Internações (SIH)": "MUNIC_RES", # Default SIH
+        "Internações (SIH)": "MUNIC_RES",
         "Nascimentos (SINASC)": "CODMUNRES", 
-        "Estabelecimentos (CNES)": "CODUFMUN", 
+        "Cadastro Nacional de Estabelecimentos (CNES)": "CODUFMUN", 
         "Notificações (SINAN)": "ID_MN_RESI"
     }
     
-    # Ajuste fino: O grupo "SP" do SIH costuma usar SP_GESTOR
     if sistema == "Internações (SIH)" and sih_grupo == "SP":
         col_filtro = "SP_GESTOR"
     else:
@@ -145,14 +145,14 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
             resultados = []
             
             # Baixa os caminhos dos arquivos do FTP
-            if sistema in ["Internações (SIH)", "Estabelecimentos (CNES)"]:
+            if "SIH" in sistema or "CNES" in sistema:
                 for m in meses_para_baixar:
                     try:
-                        if sistema == "Internações (SIH)":
-                            # Passa a sigla do sub-grupo escolhido no menu (RD, SP, ER, CM)
+                        if "SIH" in sistema:
                             res = sih(state=uf, year=ano, month=m, group=sih_grupo)
-                        else:
-                            res = cnes(state=uf, year=ano, month=m)
+                        elif "CNES" in sistema:
+                            # 🧠 O SEGREDO DO CNES AQUI: Extrai apenas o grupo selecionado (ST, PF, EQ, etc.)
+                            res = cnes(state=uf, year=ano, month=m, group=cnes_grupo)
                             
                         if isinstance(res, list): resultados.extend(res)
                         elif res is not None: resultados.append(res)
@@ -252,16 +252,18 @@ else:
     id_datasus_alvo = ""
 
 if fonte == "🏥 Saúde (DATASUS)":
+    # 🌟 MENU PRINCIPAL SIMPLIFICADO
     sistema = st.sidebar.selectbox("Sistema:", [
         "Mortalidade (SIM)", 
         "Internações (SIH)", 
         "Nascimentos (SINASC)", 
-        "Estabelecimentos (CNES)", 
+        "Cadastro Nacional de Estabelecimentos (CNES)", 
         "Notificações (SINAN)"
     ])
     
     agravo_sel = None
     sih_grupo_sel = None
+    cnes_grupo_sel = None
     
     # Seletor Dinâmico para SINAN
     if sistema == "Notificações (SINAN)":
@@ -269,7 +271,7 @@ if fonte == "🏥 Saúde (DATASUS)":
         nome_agravo = st.sidebar.selectbox("Doença/Agravo:", sorted(list(mapa_doencas.keys())))
         agravo_sel = mapa_doencas[nome_agravo]
         
-    # Seletor Dinâmico para SIH (Igual ao SINAN)
+    # Seletor Dinâmico para SIH
     elif sistema == "Internações (SIH)":
         mapa_sih = {
             "RD - Registros de Internações (Padrão)": "RD",
@@ -279,6 +281,22 @@ if fonte == "🏥 Saúde (DATASUS)":
         }
         nome_sih = st.sidebar.selectbox("Grupo de Dados (SIH):", list(mapa_sih.keys()))
         sih_grupo_sel = mapa_sih[nome_sih]
+        
+    # 🌟 NOVO: Seletor Dinâmico para CNES
+    elif sistema == "Cadastro Nacional de Estabelecimentos (CNES)":
+        mapa_cnes = {
+            "ST - Estabelecimentos": "ST",
+            "PF - Profissionais": "PF",
+            "SR - Serviços": "SR",
+            "HB - Habilitações": "HB",
+            "IN - Incentivos": "IN",
+            "EP - Estabelecimento por Procedimento": "EP",
+            "EQ - Equipamentos": "EQ",
+            "LT - Leitos": "LT",
+            "DC - Dados Complementares": "DC"
+        }
+        nome_cnes = st.sidebar.selectbox("Grupo de Dados (CNES):", list(mapa_cnes.keys()))
+        cnes_grupo_sel = mapa_cnes[nome_cnes]
     
     ano_sel = st.sidebar.selectbox("Ano de Referência:", listar_anos_disponiveis())
     
@@ -287,7 +305,7 @@ if fonte == "🏥 Saúde (DATASUS)":
     
     if st.button(f"🔍 Consultar Base"):
         with st.spinner(f"Baixando e filtrando dados para {nome_local}... Isso pode demorar se a base for muito grande."):
-            df_bruto = buscar_datasus_v7(sistema, ufs_selecionadas, ano_sel, mes_sel, agravo_sel, sih_grupo_sel, nivel_terr, id_datasus_alvo)
+            df_bruto = buscar_datasus_v7(sistema, ufs_selecionadas, ano_sel, mes_sel, agravo_sel, sih_grupo_sel, cnes_grupo_sel, nivel_terr, id_datasus_alvo)
             
             if not df_bruto.empty and "Erro" not in df_bruto.columns:
                 
@@ -298,6 +316,8 @@ if fonte == "🏥 Saúde (DATASUS)":
                     sistema_titulo = f"SINAN ({nome_agravo})"
                 elif sistema == "Internações (SIH)":
                     sistema_titulo = f"SIH ({sih_grupo_sel})"
+                elif sistema == "Cadastro Nacional de Estabelecimentos (CNES)":
+                    sistema_titulo = f"CNES ({cnes_grupo_sel})"
                 else:
                     sistema_titulo = sistema.split(" (")[0]
                 
@@ -308,7 +328,6 @@ if fonte == "🏥 Saúde (DATASUS)":
                 with col1:
                     st.subheader("✅ Planilha Tratada")
                     st.dataframe(df_tratado.head(100), use_container_width=True)
-                    # Corrigido o nome_arquivo exportado de acordo com o título limpo
                     st.download_button("📥 Baixar TRATADOS", df_tratado.to_csv(index=False, sep=';', decimal=','), f"tratado_{sistema_titulo}_{nome_local}.csv", "text/csv", use_container_width=True)
 
                 with col2:
