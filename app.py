@@ -1,21 +1,3 @@
-O famoso `NameError`! Eu sei exatamente o que causou isso e já matei a charada.
-
-### 🕵️‍♂️ O que causou o Erro:
-
-O erro apontou para a variável `id_datasus_alvo`. O que aconteceu foi um detalhe lógico de programação: essa variável só estava sendo criada se você escolhesse "Município" ou "Brasil" no filtro. Se você clicasse em "Estado", o código pulava a criação dessa variável e, na hora de buscar os dados, ele reclamava: *"Ei, cadê o id_datasus_alvo?"*.
-
-Já corrigi isso colocando um valor padrão vazio (`""`) para ela no início do fluxo.
-
-### 🔓 Trava de Segurança Removida:
-
-Seu pedido é uma ordem. **Removi a trava de segurança dos meses**.
-Agora o sistema obedece cegamente: se você escolher "Todos os Meses" para o SIH ou o CNES, o robô vai varrer de Janeiro a Dezembro em um único loop.
-
-> ⚠️ **Aviso de amigo:** Como tiramos o cinto de segurança, se você tentar puxar o ano inteiro de um estado muito pesado (como São Paulo ou Minas Gerais) no SIH, o seu servidor (Streamlit Cloud) provavelmente vai estourar a memória RAM e dar tela de "Oh no". Se for fazer isso, tenha paciência enquanto ele processa!
-
-Aqui está o código completo, sem travas e com o erro resolvido:
-
-```python
 import streamlit as st
 import pandas as pd
 import requests
@@ -366,5 +348,3 @@ else:
 
 st.divider()
 st.caption("Sistema Otimizado com Garbage Collector (Limpeza de RAM ativa).")
-
-```
