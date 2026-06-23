@@ -25,6 +25,26 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# --- FUNÇÕES BÁSICAS (ANOS E MESES) ---
+@st.cache_data
+def listar_anos_disponiveis(sistema="GERAL"):
+    ano_atual = datetime.now().year
+    limites = {
+        "Mortalidade (SIM)": 1979,
+        "Nascimentos (SINASC)": 1994,
+        "Notificações (SINAN)": 2007,
+        "Internações (SIH)": 2008,
+        "Cadastro Nacional de Estabelecimentos (CNES)": 2005,
+    }
+    ano_inicial = limites.get(sistema, 1995)
+    return list(range(ano_atual, ano_inicial - 1, -1))
+
+MESES_NOMES = [
+    "Todos os Meses", "01 - Janeiro", "02 - Fevereiro", "03 - Março", "04 - Abril",
+    "05 - Maio", "06 - Junho", "07 - Julho", "08 - Agosto",
+    "09 - Setembro", "10 - Outubro", "11 - Novembro", "12 - Dezembro"
+]
+
 # --- 1. PUXANDO O JSON DE CONFIGURAÇÕES (GITHUB) ---
 @st.cache_data(show_spinner=False)
 def carregar_dicionarios_github():
@@ -48,16 +68,12 @@ CONFIG_APP = carregar_dicionarios_github()
 def carregar_tabelas_complementares():
     tabelas = {"CBO": {}, "CID10": {}, "SIGTAP": {}}
     
-    # CID-10: Prioriza o arquivo local CSV blindado contra espaços e letras minúsculas!
     if os.path.exists("tabela_cid10_codigo_descricao.csv"):
         try:
             df_cid = pd.read_csv("tabela_cid10_codigo_descricao.csv", sep=";", dtype=str, encoding='utf-8', on_bad_lines='skip')
-            # Força a chave a ser maiúscula e sem espaços (Ex: 'X994')
             tabelas["CID10"] = dict(zip(df_cid.iloc[:, 0].str.strip().str.upper(), df_cid.iloc[:, 1].str.strip()))
-        except Exception as e:
-            st.sidebar.warning(f"Erro ao ler CID local: {e}")
+        except: pass
             
-    # SIGTAP e CBO: Busca do Repositório
     BASE_RAW_URL = "https://raw.githubusercontent.com/cartaproale/PySUS/main/"
     try:
         df_cbo = pd.read_csv(BASE_RAW_URL + "tabelas/cbo.csv", sep=";", dtype=str, encoding='utf-8')
@@ -73,7 +89,7 @@ def carregar_tabelas_complementares():
 
 TABELAS_EXTERNAS = carregar_tabelas_complementares()
 
-# --- BLINDAGEM DE VARIÁVEIS DO PYSUS (Prevenção do UnboundLocalError) ---
+# --- BLINDAGEM DE VARIÁVEIS DO PYSUS ---
 try:
     from pysus.api._impl.databases import sim as api_sim, sih as api_sih, cnes as api_cnes, sinasc as api_sinasc, sinan as api_sinan
 except ImportError:
@@ -91,16 +107,6 @@ def buscar_municipios_por_uf(uf_sigla):
         return {m['nome']: {"id7": str(m['id']), "id6": str(m['id'])[:6], "nome": m['nome'], "uf": uf_sigla} for m in res}
     except:
         return {"Belo Horizonte": {"id7": "3106200", "id6": "310620", "nome": "Belo Horizonte", "uf": "MG"}}
-
-@st.cache_data
-def listar_anos_disponiveis():
-    return list(range(datetime.now().year, 1995, -1))
-
-MESES_NOMES = [
-    "Todos os Meses", "01 - Janeiro", "02 - Fevereiro", "03 - Março", "04 - Abril",
-    "05 - Maio", "06 - Junho", "07 - Julho", "08 - Agosto",
-    "09 - Setembro", "10 - Outubro", "11 - Novembro", "12 - Dezembro"
-]
 
 # --- TRATADORES DE DADOS ---
 
@@ -153,13 +159,9 @@ def decodificar_cid(codigo, dict_cid):
 
 def tratar_e_traduzir_df(df, sistema):
     df_tratado = df.copy()
-    
-    # 🌟 A GRANDE CORREÇÃO: Força TODAS as colunas para MAIÚSCULAS para evitar bugs de nome do DATASUS
     df_tratado.columns = [str(c).upper().strip() for c in df_tratado.columns]
-    
     sigla_sistema = "SIM" if "SIM" in sistema else "SINASC" if "SINASC" in sistema else "SIH" if "SIH" in sistema else "CNES" if "CNES" in sistema else "SINAN"
     
-    # Injeta Regras Personalizadas e Dicionários
     dic_dinamico = CONFIG_APP.get("DICIONARIOS_VALORES", {})
     if "SIH" not in dic_dinamico: dic_dinamico["SIH"] = {}
     dic_dinamico["SIH"].update({"SEXO": {"1": "Masculino", "3": "Feminino"}, "MORTE": {"0": "Alta", "1": "Óbito"}})
@@ -171,18 +173,15 @@ def tratar_e_traduzir_df(df, sistema):
         "RACACORMAE": {"1": "Branca", "2": "Preta", "3": "Amarela", "4": "Parda", "5": "Indígena", "9": "Ignorado"}
     })
 
-    # Idades
     if "IDADE" in df_tratado.columns: df_tratado["IDADE"] = df_tratado["IDADE"].apply(decodificar_idade_datasus)
     if "IDADEMAE" in df_tratado.columns: 
         df_tratado["IDADEMAE"] = df_tratado["IDADEMAE"].apply(decodificar_idade_datasus)
         df_tratado["GRUPO_IDADE_MAE"] = df_tratado["IDADEMAE"].apply(agrupar_idade_mae)
     if "NU_IDADE_N" in df_tratado.columns: df_tratado["NU_IDADE_N"] = df_tratado["NU_IDADE_N"].apply(decodificar_idade_datasus)
 
-    # CBO (Ocupações atualizadas para refletir maiúsculas/minúsculas)
     for c_cbo in ["OCUP", "OCUPMAE", "CODOCUPMAE", "ID_OCUPA_N"]:
         if c_cbo in df_tratado.columns: df_tratado[c_cbo] = df_tratado[c_cbo].apply(decodificar_cbo)
 
-    # CID-10 e Procedimentos
     dict_cid = TABELAS_EXTERNAS.get("CID10", {})
     for col in ["CAUSABAS", "DIAG_PRINC", "DIAG_SECUN", "ID_AGRAVO"]:
         if col in df_tratado.columns: df_tratado[col] = df_tratado[col].apply(lambda x: decodificar_cid(x, dict_cid))
@@ -191,12 +190,10 @@ def tratar_e_traduzir_df(df, sistema):
     for col in ["PROC_REA", "PROC_SOLIC"]:
         if col in df_tratado.columns: df_tratado[col] = df_tratado[col].apply(lambda x: f"{x} - {dict_sigtap[x]}" if x in dict_sigtap else x)
 
-    # Dicionários de Códigos Numéricos
     for coluna, de_para in dic_dinamico.get(sigla_sistema, {}).items():
         if coluna in df_tratado.columns:
             df_tratado[coluna] = df_tratado[coluna].astype(str).map(de_para).fillna("Ignorado/Outros")
             
-    # Padroniza Nomes das Colunas
     cabecalhos = CONFIG_APP.get("TRADUCAO_CABECALHOS", {})
     if "SIH" not in cabecalhos: cabecalhos["SIH"] = {}
     cabecalhos["SIH"].update({"SEXO": "Sexo Paciente", "MORTE": "Desfecho (Alta/Óbito)", "VAL_TOT": "Valor Total AIH (R$)", "VAL_UTI": "Valor UTI (R$)", "DIAG_PRINC": "Diagnóstico Principal (CID-10)", "PROC_REA": "Procedimento Realizado (SIGTAP)"})
@@ -234,23 +231,19 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
             if "SIH" in sistema or "CNES" in sistema:
                 for m in meses_para_baixar:
                     if "SIH" in sistema:
-                        try: res = api_sih(state=uf, year=ano, month=m, groups=[sih_grupo])
-                        except:
-                            try: res = api_sih(state=uf, year=ano, month=m, group=sih_grupo)
-                            except:
-                                try: res = api_sih(state=uf, year=ano, month=m)
-                                except:
-                                    falhas_conexao += 1
-                                    continue
+                        try: res = api_sih(state=uf, year=ano, month=m, group=sih_grupo)
+                        except TypeError: 
+                            try: res = api_sih(state=uf, year=ano, month=m, groups=[sih_grupo])
+                            except: falhas_conexao += 1; continue
+                        except Exception: falhas_conexao += 1; continue
+                            
                     elif "CNES" in sistema:
-                        try: res = api_cnes(state=uf, year=ano, month=m, groups=[cnes_grupo])
-                        except:
-                            try: res = api_cnes(state=uf, year=ano, month=m, group=cnes_grupo)
-                            except:
-                                try: res = api_cnes(state=uf, year=ano, month=m)
-                                except:
-                                    falhas_conexao += 1
-                                    continue
+                        try: res = api_cnes(state=uf, year=ano, month=m, group=cnes_grupo)
+                        except TypeError:
+                            try: res = api_cnes(state=uf, year=ano, month=m, groups=[cnes_grupo])
+                            except: falhas_conexao += 1; continue
+                        except Exception: falhas_conexao += 1; continue
+                            
                     if isinstance(res, list): resultados.extend(res); sucessos_download += 1
                     elif res is not None: resultados.append(res); sucessos_download += 1
             else:
@@ -308,11 +301,11 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
             
     if df_final.empty:
         if sucessos_download == 0 and falhas_conexao > 0:
-            return pd.DataFrame({"Erro": ["🛑 FALHA DE CONEXÃO: O servidor do FTP do DATASUS recusou o download ou os arquivos não existem para o ano/período selecionado (Muito comum no SINASC recente)."]})
+            return pd.DataFrame({"Erro": ["🛑 FALHA DE CONEXÃO: O servidor do FTP do DATASUS recusou o download ou os arquivos não existem para o grupo/período selecionado."]})
         else:
             return pd.DataFrame({"Erro": ["⚠️ FALTA DE DADOS: O download foi realizado com sucesso, mas a tabela está vazia. Não existem registros para os filtros selecionados."]})
     
-    return df_final.drop_duplicates()
+    return df_final
 
 # --- INTERFACE PRINCIPAL ---
 
@@ -355,18 +348,17 @@ if aba_ativa == "📋 Guia Principal (Extração)":
             mapa_cnes = {"ST - Estabelecimentos": "ST", "PF - Profissionais": "PF", "SR - Serviços": "SR", "HB - Habilitações": "HB", "IN - Incentivos": "IN", "EP - Estabelecimento por Procedimento": "EP", "EQ - Equipamentos": "EQ", "LT - Leitos": "LT", "DC - Dados Complementares": "DC"}
             cnes_grupo_sel = mapa_cnes[st.sidebar.selectbox("Grupo de Dados (CNES):", list(mapa_cnes.keys()))]
         
-        ano_sel = st.sidebar.selectbox("Ano de Referência:", listar_anos_disponiveis())
+        ano_sel = st.sidebar.selectbox("Ano de Referência:", listar_anos_disponiveis(sistema))
         
-        # ⚠️ ALERTA DO SINASC INTELIGENTE
         if "SINASC" in sistema and ano_sel >= 2021:
             st.sidebar.warning("⚠️ **Aviso de Migração Governamental:** Os microdados de Nascidos Vivos após 2020 foram movidos para o Portal de Dados Abertos. A conexão nativa (FTP) pode falhar.")
-            st.info("Caso a extração automática falhe, você pode fazer o [Download Manual do CSV do SINASC clicando aqui](https://dados.gov.br/dados/conjuntos-dados/sistema-de-informacoes-sobre-nascidos-vivos-sinasc) e utilizá-lo nas suas ferramentas de análise.")
+            st.info("Caso a extração automática falhe, você pode fazer o [Download Manual do CSV do SINASC clicando aqui](https://dados.gov.br/dados/conjuntos-dados/sistema-de-informacoes-sobre-nascidos-vivos-sinasc).")
             
         nome_mes = st.sidebar.selectbox("Mês de Competência/Ocorrência (Opcional):", MESES_NOMES)
         mes_sel = None if nome_mes == "Todos os Meses" else int(nome_mes.split(" - ")[0])
         
         if st.button(f"🔍 Consultar Base"):
-            with st.spinner(f"Processando requisição para {nome_local}... Isso pode demorar bastante dependendo da base."):
+            with st.spinner(f"Processando requisição para {nome_local}... Isso pode demorar dependendo do tamanho do arquivo original."):
                 df_bruto = buscar_datasus_v7(sistema, ufs_selecionadas, ano_sel, mes_sel, agravo_sel, sih_grupo_sel, cnes_grupo_sel, nivel_terr, id_datasus_alvo)
                 
                 if not df_bruto.empty and "Erro" not in df_bruto.columns:
@@ -379,20 +371,17 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                     tab1, tab2, tab3 = st.tabs(["✅ Planilha Tratada", "⚙️ Planilha Bruta", "📈 Painel de Análises (Dashboards)"])
                     
                     with tab1:
-                        st.dataframe(df_tratado.head(100), use_container_width=True)
+                        st.dataframe(df_tratado.head(100))
                         st.download_button("📥 Baixar Tabela TRATADA (CSV)", df_tratado.to_csv(index=False, sep=';', decimal=','), f"tratado_{sistema_titulo}_{nome_local}.csv", "text/csv")
                     with tab2:
-                        st.dataframe(df_bruto.head(100), use_container_width=True)
+                        st.dataframe(df_bruto.head(100))
                         st.download_button("📥 Baixar Tabela BRUTA (CSV)", df_bruto.to_csv(index=False, sep=';', decimal=','), f"bruto_{sistema_titulo}_{nome_local}.csv", "text/csv")
                         
-                    # 🌟 DASHBOARDS DINÂMICOS AVANÇADOS
                     with tab3:
                         st.subheader(f"📊 Painel Analítico: {sistema_titulo}")
                         
                         if "SIH" in sistema:
-                            # DASHBOARD SIH (ECONOMIA E DESFECHO)
                             c1, c2, c3 = st.columns(3)
-                            
                             for c_val in ["Valor Total AIH (R$)", "Valor UTI (R$)"]:
                                 if c_val in df_tratado.columns:
                                     df_tratado[f"Num_{c_val}"] = pd.to_numeric(df_tratado[c_val].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
@@ -405,9 +394,9 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             
                             c_sexo, c_morte = st.columns(2)
                             with c_sexo:
-                                col_sexo = next((c for c in df_tratado.columns if "Sexo" in c), None)
+                                col_sexo = next((c for c in df_tratado.columns if "Sexo Paciente" in c), None)
                                 if col_sexo:
-                                    st.write(f"**Distribuição por {col_sexo}**")
+                                    st.write(f"**Distribuição por Sexo**")
                                     st.bar_chart(df_tratado[col_sexo].value_counts())
                             with c_morte:
                                 if "Desfecho (Alta/Óbito)" in df_tratado.columns:
@@ -425,7 +414,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     st.bar_chart(df_tratado["Diagnóstico Principal (CID-10)"].value_counts().head(10))
                                 
                         elif "SINASC" in sistema:
-                            # DASHBOARD SINASC (PERFIL MATERNO E INFANTIL)
                             st.write("### Perfil da Mãe")
                             c1, c2 = st.columns(2)
                             with c1:
@@ -433,7 +421,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     st.write("**Idade das Mães no Parto**")
                                     st.bar_chart(df_tratado["Faixa Etária da Mãe"].value_counts().sort_index())
                             with c2:
-                                col_esc = next((c for c in df_tratado.columns if "Escolaridade" in c), None)
+                                col_esc = next((c for c in df_tratado.columns if "Escolaridade Mãe (2010)" in c or "Escolaridade Mãe" in c), None)
                                 if col_esc:
                                     st.write(f"**{col_esc}**")
                                     st.bar_chart(df_tratado[col_esc].value_counts())
@@ -446,7 +434,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             st.write("### Perfil do Nascido Vivo")
                             c3, c4, c5 = st.columns(3)
                             with c3:
-                                col_sexo = next((c for c in df_tratado.columns if "Sexo" in c), None)
+                                col_sexo = next((c for c in df_tratado.columns if "Sexo Bebê" in c), None)
                                 if col_sexo:
                                     st.write("**Sexo do Bebê**")
                                     st.bar_chart(df_tratado[col_sexo].value_counts())
@@ -465,7 +453,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             st.write("📈 *O Painel Gráfico prioriza bases clínicas e epidemiológicas. Explore a lista bruta de recursos do CNES na aba de Planilha.*")
                             
                         elif "SIM" in sistema:
-                            # DASHBOARD SIM (MORTALIDADE)
                             c1, c2 = st.columns(2)
                             col_sexo = next((c for c in df_tratado.columns if "Sexo" in c), None)
                             if col_sexo:
@@ -480,17 +467,16 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             
                             c3, c4 = st.columns(2)
                             with c3:
-                                col_circ = next((c for c in df_tratado.columns if "Circunstância" in c), None)
+                                col_circ = next((c for c in df_tratado.columns if "Circunstância do Óbito" in c), None)
                                 if col_circ:
-                                    st.write(f"**{col_circ}**")
+                                    st.write(f"**Circunstância do Óbito**")
                                     st.bar_chart(df_tratado[col_circ].value_counts())
                             with c4:
-                                col_doenca = next((c for c in df_tratado.columns if "CID-10" in c), None)
+                                col_doenca = next((c for c in df_tratado.columns if "Causa Básica (CID-10)" in c), None)
                                 if col_doenca:
-                                    st.write(f"**Top 10 Principais Causas ({col_doenca})**")
+                                    st.write(f"**Top 10 Causas de Mortalidade ({col_doenca})**")
                                     st.bar_chart(df_tratado[col_doenca].value_counts().head(10))
                         else:
-                            # DASHBOARD SINAN
                             c1, c2 = st.columns(2)
                             col_sexo = next((c for c in df_tratado.columns if "Sexo" in c), None)
                             if col_sexo:
@@ -518,7 +504,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                     else:
                         for i, t in enumerate(tabelas):
                             st.write(f"**Tabela {i+1}**")
-                            st.dataframe(t, use_container_width=True)
+                            st.dataframe(t)
                             st.download_button(f"📥 Baixar Tabela {i+1}", t.to_csv(index=False, sep=';'), f"mds_tabela_{i+1}.csv", "text/csv", key=f"btn_{i}")
                 except: st.error("Servidor MDS bloqueou a conexão.")
 
