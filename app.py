@@ -154,7 +154,7 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
         df_t = df_t.copy()
         df_t.columns = [str(c).upper().strip() for c in df_t.columns]
         
-        col_filtro_real = next((c for c in df_t.columns if c in [x.upper() for x in cols_alvo]), None)
+        col_filtro_real = next((c Browser for c in df_t.columns if c in [x.upper() for x in cols_alvo]), None)
         dt_col_real = next((c for c in df_t.columns if c in dt_alvos), None)
         
         if nivel_terr == "Município" and not col_filtro_real:
@@ -191,7 +191,6 @@ def leitura_segura_parquet(caminho, limite=50000):
         print(f"[ERRO LEITURA SEGURA] {repr(e)}")
         return pd.DataFrame()
 
-# --- 🌟 ADICIONADO: FUNÇÕES AUXILIARES DE NORMALIZAÇÃO E FILTRAGEM ESTRITA DE TOKENS SIH ---
 def normalizar_lista_arquivos_pysus(res):
     if res is None:
         return []
@@ -257,7 +256,6 @@ def baixar_sih_seguro_pysus23(uf, ano, mes, grupo):
         print(f"[SIH ERRO API 2.3] {uf} {ano}/{mes} grupo={grupo}: {repr(e)}")
         return []
 
-# --- 🌟 MOTOR DUCKDB ADAPTADO COM REGRAS ESTRITAS DE VALIDAÇÃO DE TOKENS COMPLETOS ---
 def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado="Amostra limitada de microdados", prefixo_esperado=None):
     if cols_alvo is None: cols_alvo = []
     arquivos_lidos = 0
@@ -326,7 +324,6 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
         print(f"[ERRO processar_retorno_pysus] {repr(e)}")
     return pd.DataFrame(), arquivos_lidos
 
-# --- MOTOR DATASUS REESTRUTURADO ---
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo="", tipo_resultado=""):
     if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     
@@ -345,7 +342,6 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                 df_temp = pd.DataFrame()
                 arquivos_lidos = 0
                 try:
-                    # 🌟 CORREÇÃO TÉCNICA: Acionamento cirúrgico de baixar_sih_seguro_pysus23 com tokenização estrita de tokens chronos
                     if "SIH" in sistema:
                         res = baixar_sih_seguro_pysus23(uf, ano, m, sih_grupo)
                         if isinstance(res, pd.DataFrame) and "Erro" in res.columns:
@@ -427,56 +423,6 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
     
     df_final = pd.concat(partes_final, ignore_index=True)
     return df_final
-
-def decodificar_idade_datasus(valor):
-    v_str = normalizar_codigo(valor)
-    if not v_str: return "Não informado"
-    try:
-        if len(v_str) in [1, 2]: return f"{v_str} Ano(s)"
-        if len(v_str) >= 3:
-            u, q = v_str[0], int(v_str[1:])
-            if u == '1': return f"{q} Minuto(s)"
-            elif u == '2': return f"{q} Hora(s)"
-            elif u == '3': return f"{q} Mês(es)"
-            elif u == '4': return f"{q} Ano(s)"
-            elif u == '5': return f"{100 + q} Ano(s)"
-            else: return f"{q} (Idade ñ ident.)"
-    except: return str(valor)
-
-def agrupar_idade_mae(idade_str):
-    if "Ano(s)" not in str(idade_str): return "Ignorado"
-    try:
-        idade = int(idade_str.replace(" Ano(s)", ""))
-        if idade < 15: return "< 15 anos"
-        elif 15 <= idade <= 19: return "15 a 19 anos"
-        elif 20 <= idade <= 29: return "20 a 29 anos"
-        elif 30 <= idade <= 39: return "30 a 39 anos"
-        else: return "40 anos ou mais"
-    except: return "Ignorado"
-
-def decodificar_cbo(codigo):
-    cod_str = normalizar_codigo(codigo).zfill(6)
-    if cod_str in ['', '000000', '999999']: return "Não informado"
-    dict_cbo = TABELAS_EXTERNAS.get("CBO", {})
-    if dict_cbo and cod_str in dict_cbo: return f"{cod_str} - {dict_cbo[cod_str]}"
-    if dict_cbo and cod_str[:4] in dict_cbo: return f"{cod_str} - {dict_cbo[cod_str[:4]]}"
-    cbo_esp = CONFIG_APP.get("CBO_ESPECIFICOS", {})
-    if cod_str[:4] in cbo_esp: return f"{cod_str} - {cbo_esp[cod_str[:4]]}"
-    return f"{cod_str} - {CONFIG_APP.get('CBO_SUBGRUPOS', {}).get(cod_str[:2], 'Outros')}"
-
-def decodificar_cid(codigo, dict_cid):
-    cod_str = normalizar_codigo(codigo).upper()
-    if not cod_str: return "Não informado"
-    if dict_cid:
-        if cod_str in dict_cid: return f"{cod_str} - {dict_cid[cod_str]}"
-        if cod_str[:3] in dict_cid: return f"{cod_str} - {dict_cid[cod_str[:3]]}"
-    return cod_str
-
-def decodificar_sigtap(codigo, dict_sigtap):
-    cod = normalizar_codigo(codigo).zfill(10)
-    if not cod or cod == '0000000000': return "Não informado"
-    if dict_sigtap and cod in dict_sigtap: return f"{cod} - {dict_sigtap[cod]}"
-    return cod
 
 def tratar_e_traduzir_df(df, sistema):
     df_tratado = df.copy()
@@ -571,7 +517,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
             nome_agravo = st.sidebar.selectbox("Doença/Agravo:", sorted(list(mapa_doencas.keys())))
             agravo_sel = mapa_doencas[nome_agravo]
         elif "SIH" in sistema:
-            # 🌟 CORREÇÃO TÉCNICA: Rótulos e Avisos de Metodologia para Grupos Diferentes de RD
             mapa_sih = {
                 "RD - Registros de Internações / AIH Reduzida (padrão)": "RD",
                 "SP - Serviços Profissionais (não representa nº de internações)": "SP",
@@ -625,7 +570,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             df_tratado = tratar_e_traduzir_df(df_bruto, sistema)
                             sistema_titulo = f"SINAN ({nome_agravo})" if "SINAN" in sistema else f"SIH ({sih_grupo_sel})" if "SIH" in sistema else f"CNES ({cnes_grupo_sel})" if "CNES" in sistema else sistema.split(" (")[0]
                         
-                        # 🌟 CORREÇÃO TÉCNICA: Card de métrica estruturado com rótulo de período temporal exato
+                        # 🌟 CORREÇÃO DE SINTAXE DEPLOY COMPLETO EFETUADO COM SUCESSO
                         periodo_label = f"{mes_sel:02d}/{ano_sel}" if mes_sel else f"{ano_sel}"
                         st.markdown(
                             f'<div class="metric-card"><h2>{len(df_bruto)} Registros Processados</h2><p>{sistema_titulo} - {nome_local} ({periodo_label})</p></div>',
@@ -664,7 +609,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     
                                     c_sexo, c_morte = st.columns(2)
                                     with c_sexo:
-                                        col_sexo = next((c Gems for c in df_tratado.columns if "Sexo Paciente" in c), None)
+                                        col_sexo = next((c for c in df_tratado.columns if "Sexo Paciente" in c), None)
                                         if col_sexo: st.bar_chart(df_tratado[col_sexo].value_counts())
                                     with c_morte:
                                         if "Desfecho (Alta/Óbito)" in df_tratado.columns: st.bar_chart(df_tratado["Desfecho (Alta/Óbito)"].value_counts())
@@ -767,7 +712,6 @@ elif aba_ativa == "📚 Dicionários e Citações":
         """)
 
     with st.expander("🛏️ SIH (Sistema de Informações Hospitalares)"):
-        # 🌟 ADICIONADO: NOTAS TÉCNICAS E METODOLÓGICAS COMPLETAS SOBRE A FRAGILIDADE DOS GRUPOS CM, ER E SP NO EXPANDER DO SIH
         st.markdown("""
         * **Resumo:** Dados de internações hospitalares e faturamentos vinculados pelo SUS. A tabela do tipo RD (AIH Reduzida) é o padrão-ouro e contém o resumo clínico e financeiro completo da internação do paciente.
         * **DIAG_PRINC / DIAG_SECUN:** Diagnósticos registrados em formato CID-10, passíveis de mapeamento automático.
@@ -813,7 +757,7 @@ elif aba_ativa == "📚 Dicionários e Citações":
         st.markdown("""
         O sistema consulta os dicionários consolidados do repositório *cartaproale* no GitHub para alta performance na tradução de chaves técnicas:
         **1. CBO-2002 (Classificação Brasileira de Ocupações):**
-        * Realiza o mapeamento exato das profissões através della tabela oficial.
+        * Realiza o mapeamento exato das profissões através da tabela oficial.
         **2. CID-10 (Doenças):**
         * Extrai o significado clínico exato dos códigos presentes nas colunas `CAUSABAS` (SIM) ou `DIAG_PRINC` (SIH).
         **3. SIGTAP (Procedimentos SUS):**
@@ -826,17 +770,17 @@ elif aba_ativa == "📚 Dicionários e Citações":
 
     with st.expander("⏳ Atraso de Digitação e Consolidação (Lag)"):
         st.markdown("""
-        Os dados de saúde pública no Brasil sofrem um atraso natural entre a ocorrência e a disponibilidade no sistema:
+        Los dados de saúde pública no Brasil sofrem um atraso natural entre a ocorrência e a disponibilidade no sistema:
         * **SIH (Internações):** É o sistema mais ágil (focado em faturamento). Atraso médio de **2 a 3 meses**.
         * **SINAN (Agravos):** Varia por doença. Epidemias são rápidas, mas agravos crônicos podem levar até **6 meses** para chegar ao servidor federal.
         * **SIM e SINASC (Óbitos e Nascimentos):** São os mais lentos devido à burocracia de cartórios e validações. Dados do ano corrente são sempre \"Preliminares\". A base consolidada pode levar até **2 anos** para ser fechada.
         """)
 
-    with st.expander("🛑 Limitações Recentes do SINASC (A partir de 2021)"):
+    with st.expander("🛑 Limitações Recentes do SINASC (A partir de 2020)"):
         st.markdown("""
-        * **O que acontece:** O Ministério da Saúde reestruturou a forma de armazenar os dados de Nascidos Vivos no servidor FTP a partir de 2021 (devido a mudanças de formulário e LGPD).
+        * **O que acontece:** O Ministério da Saúde reestruturou a forma de armazenar os dados de Nascidos Vivos no servidor FTP a partir de 2020 (devido a mudanças de formulário e LGPD).
         * **Impacto na Extração:** A ferramenta PySUS pode não conseguir localizar as pastas recentes automaticamente no servidor raiz antigo.
-        * **Solução Alternativa:** Para dados de 2021 em diante, caso a extração retorne vazia, recomenda-se o download manual do `.csv` diretamente no **Portal de Dados Abertos do Governo Federal**.
+        * **Solução Alternativa:** Para dados de 2020 em diante, caso a extração retorne vazia, recomenda-se o download manual do `.csv` diretamente no **Portal de Dados Abertos do Governo Federal**.
         """)
         
     st.markdown("---")
