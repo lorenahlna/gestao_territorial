@@ -115,7 +115,7 @@ def buscar_municipios_por_uf(uf_sigla):
     except:
         return {"Belo Horizonte": {"id7": "3106200", "id6": "310620", "nome": "Belo Horizonte", "uf": "MG"}}
 
-# --- TRATADORES DE DADOS (COM NORMALIZAÇÃO DE CÓDIGOS) ---
+# --- TRATADORES DE DADOS ---
 
 def normalizar_codigo(valor):
     if pd.isna(valor): return ""
@@ -204,8 +204,6 @@ def decodificar_sigtap(codigo, dict_sigtap):
 
 def tratar_e_traduzir_df(df, sistema):
     df_tratado = df.copy()
-    
-    # Força TODAS as colunas para MAIÚSCULAS
     df_tratado.columns = [str(c).upper().strip() for c in df_tratado.columns]
     
     sigla_sistema = "SIM" if "SIM" in sistema else "SINASC" if "SINASC" in sistema else "SIH" if "SIH" in sistema else "CNES" if "CNES" in sistema else "SINAN"
@@ -221,27 +219,27 @@ def tratar_e_traduzir_df(df, sistema):
         "RACACORMAE": {"1": "Branca", "2": "Preta", "3": "Amarela", "4": "Parda", "5": "Indígena", "9": "Ignorado"}
     })
 
-    if "IDADE" in df_tratado.columns: df_tratado["IDADE"] = df_tratado["IDADE"].apply(decodificar_idade_datasus)
+    if "IDADE" in df_tratado.columns: df_tratado.loc[:, "IDADE"] = df_tratado["IDADE"].apply(decodificar_idade_datasus)
     if "IDADEMAE" in df_tratado.columns: 
-        df_tratado["IDADEMAE"] = df_tratado["IDADEMAE"].apply(decodificar_idade_datasus)
+        df_tratado.loc[:, "IDADEMAE"] = df_tratado["IDADEMAE"].apply(decodificar_idade_datasus)
         df_tratado["GRUPO_IDADE_MAE"] = df_tratado["IDADEMAE"].apply(agrupar_idade_mae)
-    if "NU_IDADE_N" in df_tratado.columns: df_tratado["NU_IDADE_N"] = df_tratado["NU_IDADE_N"].apply(decodificar_idade_datasus)
+    if "NU_IDADE_N" in df_tratado.columns: df_tratado.loc[:, "NU_IDADE_N"] = df_tratado["NU_IDADE_N"].apply(decodificar_idade_datasus)
 
     for c_cbo in ["OCUP", "OCUPMAE", "CODOCUPMAE", "ID_OCUPA_N"]:
-        if c_cbo in df_tratado.columns: df_tratado[c_cbo] = df_tratado[c_cbo].apply(decodificar_cbo)
+        if c_cbo in df_tratado.columns: df_tratado.loc[:, c_cbo] = df_tratado[c_cbo].apply(decodificar_cbo)
 
     dict_cid = TABELAS_EXTERNAS.get("CID10", {})
     for col in ["CAUSABAS", "DIAG_PRINC", "DIAG_SECUN", "ID_AGRAVO"]:
-        if col in df_tratado.columns: df_tratado[col] = df_tratado[col].apply(lambda x: decodificar_cid(x, dict_cid))
+        if col in df_tratado.columns: df_tratado.loc[:, col] = df_tratado[col].apply(lambda x: decodificar_cid(x, dict_cid))
 
     dict_sigtap = TABELAS_EXTERNAS.get("SIGTAP", {})
     for col in ["PROC_REA", "PROC_SOLIC"]:
-        if col in df_tratado.columns: df_tratado[col] = df_tratado[col].apply(lambda x: decodificar_sigtap(x, dict_sigtap))
+        if col in df_tratado.columns: df_tratado.loc[:, col] = df_tratado[col].apply(lambda x: decodificar_sigtap(x, dict_sigtap))
 
-    # Aplicação de Dicionários com Normalização de Código
+    # Aplicação de Dicionários com Normalização Segura
     for coluna, de_para in dic_dinamico.get(sigla_sistema, {}).items():
         if coluna in df_tratado.columns:
-            df_tratado[coluna] = df_tratado[coluna].apply(normalizar_codigo).map(de_para).fillna("Ignorado/Outros")
+            df_tratado.loc[:, coluna] = df_tratado[coluna].apply(normalizar_codigo).map(de_para).fillna("Ignorado/Outros")
             
     cabecalhos = CONFIG_APP.get("TRADUCAO_CABECALHOS", {})
     if "SIH" not in cabecalhos: cabecalhos["SIH"] = {}
@@ -252,82 +250,63 @@ def tratar_e_traduzir_df(df, sistema):
     df_tratado = df_tratado.rename(columns=cabecalhos.get(sigla_sistema, {}))
     return df_tratado
 
-# --- MOTOR DATASUS SEGURO E BLINDADO ---
+# --- MOTOR DATASUS COM GESTÃO DE MEMÓRIA (LISTA PARTES) ---
 
 def processar_retorno_pysus(res):
-    """
-    CORREÇÃO DO BUG 'FALTA DE DADOS': 
-    Agora lê corretamente strings, DataFrames e, principalmente, Listas de Strings (Caminhos Parquet baixados pelo PySUS)
-    """
     try:
-        if isinstance(res, pd.DataFrame): 
-            return res
-        if hasattr(res, 'to_pandas'): 
-            return res.to_pandas()
-        
-        # Se for um único caminho (string)
+        if isinstance(res, pd.DataFrame): return res.copy()
+        if hasattr(res, 'to_pandas'): return res.to_pandas().copy()
         if isinstance(res, str):
             if res.endswith('.parquet'): return pd.read_parquet(res)
             if res.endswith('.csv'): return pd.read_csv(res)
-            try: return pd.read_parquet(res) # Tenta ler mesmo sem extensão
+            try: return pd.read_parquet(res)
             except: pass
             
-        # 🌟 O SEGREDO DO BUG: Se for uma LISTA de caminhos de arquivos (Strings)
         if isinstance(res, list) and len(res) > 0:
             frames = []
             for r in res:
-                if hasattr(r, 'to_pandas'): 
-                    frames.append(r.to_pandas())
-                elif isinstance(r, pd.DataFrame): 
-                    frames.append(r)
-                elif isinstance(r, str) and r.endswith('.parquet'): 
-                    frames.append(pd.read_parquet(r))
+                if hasattr(r, 'to_pandas'): frames.append(r.to_pandas())
+                elif isinstance(r, pd.DataFrame): frames.append(r)
+                elif isinstance(r, str) and r.endswith('.parquet'): frames.append(pd.read_parquet(r))
                 elif isinstance(r, str):
                     try: frames.append(pd.read_parquet(r))
                     except: pass
-            
-            if frames: 
-                return pd.concat(frames, ignore_index=True)
-                
+            if frames: return pd.concat(frames, ignore_index=True)
     except Exception as e:
-        print(f"Erro no processamento do arquivo: {e}")
-        
+        print(f"Erro processando arquivo: {e}")
     return pd.DataFrame()
 
-def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Brasil", id_datasus_alvo=""):
+def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo=""):
     if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     
-    df_final = pd.DataFrame()
+    partes_final = [] # Evita concatenação progressiva de memória
     meses_para_baixar = [mes_num] if mes_num else list(range(1, 13))
 
     cols_alvo = obter_colunas_municipio(sistema, sih_grupo)
     dt_alvos = ["DTOBITO", "DTNASC", "DT_NOTIFIC"]
-
-    sinan_baixado = False
+    
     falhas = []
     sucessos_download = 0
 
     for uf in ufs_lista:
         resultados = []
-        
         if "SIH" in sistema or "CNES" in sistema:
             for m in meses_para_baixar:
                 df_temp = pd.DataFrame()
                 try:
                     if "SIH" in sistema:
-                        try:
-                            res = api_sih(state=uf, year=ano, month=m, group=sih_grupo, as_dataframe=True)
-                        except TypeError:
-                            res = api_sih(state=uf, year=ano, month=m, group=sih_grupo)
+                        try: res = api_sih(state=uf, year=ano, month=m, group=sih_grupo, as_dataframe=True)
+                        except TypeError: res = api_sih(state=uf, year=ano, month=m, group=sih_grupo)
                         df_temp = processar_retorno_pysus(res)
                     elif "CNES" in sistema:
                         res = api_cnes(state=uf, year=ano, month=m, group=cnes_grupo)
                         df_temp = processar_retorno_pysus(res)
                 except Exception as e:
-                    falhas.append(f"{sistema} ({sih_grupo or cnes_grupo}) | {uf} {ano}/{m:02d}: {e}")
+                    falhas.append(f"Download Error {sistema} | {uf} {ano}/{m:02d}: {e}")
                     continue
 
                 if not df_temp.empty:
+                    print(f"[OK] Download {sistema} | UF={uf} | Ano={ano}/{m:02d} | Linhas: {len(df_temp)}")
                     resultados.append(df_temp)
                     sucessos_download += 1
                 else:
@@ -343,43 +322,46 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                     res = api_sinasc(state=uf, year=ano)
                     df_temp = processar_retorno_pysus(res)
                 elif "SINAN" in sistema:
-                    if not (sinan_baixado and nivel_terr == "Brasil"):
-                        try: res = api_sinan(disease=agravo, year=ano) 
-                        except TypeError: res = api_sinan(disease=agravo, state=uf, year=ano)
-                        df_temp = processar_retorno_pysus(res)
-                        sinan_baixado = True
+                    try: res = api_sinan(disease=agravo, year=ano) 
+                    except TypeError: res = api_sinan(disease=agravo, state=uf, year=ano)
+                    df_temp = processar_retorno_pysus(res)
             except Exception as e:
-                falhas.append(f"{sistema} | {uf} {ano}: {e}")
+                falhas.append(f"Download Error {sistema} | {uf} {ano}: {e}")
                 continue
 
             if not df_temp.empty:
+                print(f"[OK] Download {sistema} | UF={uf} | Ano={ano} | Linhas: {len(df_temp)}")
                 resultados.append(df_temp)
                 sucessos_download += 1
             else:
                 falhas.append(f"{sistema} VAZIO | {uf} {ano}")
         
+        # Filtros de Dados (Blindado com .copy() e .loc)
         for df_t in resultados:
             try:
+                df_t = df_t.copy()
                 df_t.columns = [str(c).upper().strip() for c in df_t.columns]
                 col_filtro_real = next((c for c in df_t.columns if c in [x.upper() for x in cols_alvo]), None)
                 dt_col_real = next((c for c in df_t.columns if c in dt_alvos), None)
                 
                 if "SINAN" in sistema and nivel_terr in ["Estado", "Município"] and col_filtro_real:
                     codigo_uf_ibge = ESTADOS_IBGE.get(uf, "")
-                    df_t = df_t[df_t[col_filtro_real].astype(str).str.startswith(codigo_uf_ibge)]
+                    df_t.loc[:, col_filtro_real] = df_t[col_filtro_real].apply(normalizar_codigo)
+                    df_t = df_t[df_t[col_filtro_real].str.startswith(codigo_uf_ibge)].copy()
                 
                 if nivel_terr == "Município" and col_filtro_real:
-                    df_t[col_filtro_real] = df_t[col_filtro_real].apply(normalizar_codigo)
-                    df_t = df_t[df_t[col_filtro_real].str.startswith(id_datasus_alvo)]
+                    df_t.loc[:, col_filtro_real] = df_t[col_filtro_real].apply(normalizar_codigo)
+                    df_t = df_t[df_t[col_filtro_real].str.startswith(id_datasus_alvo)].copy()
+                    print(f"[FILTRO TERRITÓRIO] {sistema} | UF={uf} | Mun={id_datasus_alvo} | Linhas após filtro: {len(df_t)}")
                 
                 if mes_num is not None and dt_col_real:
                     meses_extraidos = extrair_mes_datasus(df_t[dt_col_real])
-                    df_t = df_t[meses_extraidos == mes_num]
+                    df_t = df_t[meses_extraidos == mes_num].copy()
+                    print(f"[FILTRO MÊS] {sistema} | UF={uf} | Mês={mes_num} | Linhas após filtro: {len(df_t)}")
                 
-                if not df_t.empty: df_final = pd.concat([df_final, df_t], ignore_index=True)
+                if not df_t.empty: 
+                    partes_final.append(df_t)
                 
-                del df_t
-                gc.collect()
             except Exception as e:
                 falhas.append(f"Erro no Filtro | {uf}: {e}")
                 continue
@@ -387,12 +369,14 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
         del resultados
         gc.collect()
             
-    if df_final.empty:
+    if not partes_final:
         if sucessos_download == 0 and len(falhas) > 0:
-            return pd.DataFrame({"Erro": [f"🛑 FALHA DE CONEXÃO ou ARQUIVO INEXISTENTE. O DATASUS não retornou dados para este período.\nDetalhes: {falhas[0]}"]})
+            print(f"[ERRO GERAL] Detalhes das falhas: {falhas}")
+            return pd.DataFrame({"Erro": [f"🛑 FALHA DE CONEXÃO. O DATASUS não retornou dados. Verifique os logs no terminal."]})
         else:
-            return pd.DataFrame({"Erro": ["⚠️ FALTA DE DADOS: O download foi realizado, mas a tabela está vazia após a aplicação dos filtros geográficos/temporais."]})
+            return pd.DataFrame({"Erro": ["⚠️ FALTA DE DADOS: A extração foi realizada, mas a tabela ficou vazia após a filtragem."]})
     
+    df_final = pd.concat(partes_final, ignore_index=True)
     return df_final
 
 # --- INTERFACE PRINCIPAL ---
@@ -410,11 +394,11 @@ if aba_ativa == "📋 Guia Principal (Extração)":
         st.warning("VIS DATA 3 ainda não está conectado nesta versão.")
         st.stop()
         
-    nivel_terr = st.sidebar.radio("Nível Territorial:", ["Brasil", "Estado", "Município"])
+    nivel_terr = st.sidebar.radio("Nível Territorial:", ["Estado", "Município"])
 
-    ufs_selecionadas = UFS; id_ibge_alvo = "1"; id_datasus_alvo = ""
-
+    ufs_selecionadas = []; id_ibge_alvo = "1"; id_datasus_alvo = ""
     ufs_ordenadas = sorted(UFS)
+
     if nivel_terr == "Estado":
         uf_sel = st.sidebar.selectbox("Selecione o Estado:", ufs_ordenadas, index=ufs_ordenadas.index("MG"))
         ufs_selecionadas = [uf_sel]; id_ibge_alvo = ESTADOS_IBGE[uf_sel]; nome_local = uf_sel
@@ -424,7 +408,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
         mun_nome = st.sidebar.selectbox("Selecione o Município:", sorted(muns_estado.keys()))
         dados_mun = muns_estado[mun_nome]
         ufs_selecionadas = [uf_sel]; id_ibge_alvo = dados_mun['id7']; id_datasus_alvo = dados_mun['id6']; nome_local = mun_nome
-    else: nome_local = "Brasil"
 
     if fonte == "🏥 Saúde (DATASUS)":
         sistema = st.sidebar.selectbox("Sistema:", ["Mortalidade (SIM)", "Internações (SIH)", "Nascimentos (SINASC)", "Cadastro Nacional de Estabelecimentos (CNES)", "Notificações (SINAN)"])
@@ -445,13 +428,17 @@ if aba_ativa == "📋 Guia Principal (Extração)":
         ano_sel = st.sidebar.selectbox("Ano de Referência:", listar_anos_disponiveis(sistema))
         
         if "SINASC" in sistema and ano_sel >= 2021:
-            st.sidebar.warning("⚠️ **Aviso de Migração Governamental:** Os microdados de Nascidos Vivos após 2020 foram movidos para o Portal de Dados Abertos. A conexão nativa (FTP) pode falhar.")
+            st.sidebar.warning("⚠️ **Aviso de Migração:** Os microdados de Nascidos Vivos após 2020 foram movidos para o Portal de Dados Abertos. A conexão nativa (FTP) pode falhar.")
             
         nome_mes = st.sidebar.selectbox("Mês de Competência/Ocorrência (Opcional):", MESES_NOMES)
         mes_sel = None if nome_mes == "Todos os Meses" else int(nome_mes.split(" - ")[0])
         
-        if st.button(f"🔍 Consultar Base"):
-            with st.spinner(f"Processando requisição para {nome_local}... Isso pode demorar dependendo do tamanho do arquivo original."):
+        # 🌟 UTILIZANDO ST.FORM PARA PREVENIR RERUNS MÚLTIPLOS E ACIDENTAIS
+        with st.sidebar.form("form_consulta"):
+            submit_button = st.form_submit_button("🔍 Consultar Base")
+
+        if submit_button:
+            with st.spinner(f"Processando requisição para {nome_local}... Acompanhe os logs no terminal."):
                 df_bruto = buscar_datasus_v7(sistema, ufs_selecionadas, ano_sel, mes_sel, agravo_sel, sih_grupo_sel, cnes_grupo_sel, nivel_terr, id_datasus_alvo)
                 
                 if not df_bruto.empty and "Erro" not in df_bruto.columns:
@@ -472,7 +459,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                         
                     with tab3:
                         st.subheader(f"📊 Painel Analítico: {sistema_titulo}")
-                        
                         if "SIH" in sistema:
                             c1, c2, c3 = st.columns(3)
                             for c_val in ["Valor Total AIH (R$)", "Valor UTI (R$)"]:
@@ -514,10 +500,9 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     st.write("**Idade das Mães no Parto**")
                                     st.bar_chart(df_tratado["Faixa Etária da Mãe"].value_counts().sort_index())
                             with c2:
-                                col_esc = next((c for c in df_tratado.columns if "Escolaridade Mãe (2010)" in c or "Escolaridade Mãe" in c), None)
-                                if col_esc:
-                                    st.write(f"**{col_esc}**")
-                                    st.bar_chart(df_tratado[col_esc].value_counts())
+                                if "Escolaridade Mãe (2010)" in df_tratado.columns:
+                                    st.write(f"**Escolaridade Mãe (2010)**")
+                                    st.bar_chart(df_tratado["Escolaridade Mãe (2010)"].value_counts())
                                     
                             if "Ocupação/Profissão Mãe (CBO)" in df_tratado.columns:
                                 st.write("**Top 10 Ocupações das Mães**")
@@ -585,10 +570,13 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                     msg = df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados disponíveis."
                     st.error(msg)
 
-# 🌟 ABA DE DICIONÁRIOS E CITAÇÕES
+# 🌟 ABA DE DICIONÁRIOS E CITAÇÕES ATUALIZADA
 elif aba_ativa == "📚 Dicionários e Citações":
-    st.title("📚 Dicionários e Metadados")
-    st.markdown("Consulte os Manuais Oficiais para entender a Planilha Tratada:")
+    st.title("📚 Dicionários de Dados e Normas de Citação")
+    st.markdown("---")
+    
+    st.header("1. Dicionários de Dados (Variáveis)")
+    st.write("Abaixo estão os resumos das principais variáveis processadas e traduzidas automaticamente na **Planilha Tratada**, com base na estrutura dos formulários governamentais:")
     
     with st.expander("🏥 CNES (Cadastro Nacional de Estabelecimentos de Saúde)"):
         st.markdown("""
@@ -635,4 +623,45 @@ elif aba_ativa == "📚 Dicionários e Citações":
         * **CS_RACA:** 1-Branca | 2-Preta | 3-Amarela | 4-Parda | 5-Indígena | 9-Ignorado.
         """)
         
-    st.info("Sempre cite as fontes originais: BRASIL. Ministério da Saúde. DATASUS.")
+    with st.expander("📂 Tabelas Complementares Integradas (SIGTAP, CID-10, CBO)"):
+        st.markdown("""
+        O sistema consulta os dicionários consolidados do repositório *cartaproale* no GitHub para alta performance na tradução de chaves técnicas:
+
+        **1. CBO-2002 (Classificação Brasileira de Ocupações):**
+        * Realiza o mapeamento exato das profissões (coluna `OCUP` ou similar) através da tabela oficial. Se houver falha, o sistema aciona uma contingência híbrida lendo os subgrupos prioritários.
+
+        **2. CID-10 (Doenças):**
+        * Extrai o significado clínico exato dos códigos presentes nas colunas `CAUSABAS` (SIM) ou `DIAG_PRINC` (SIH).
+
+        **3. SIGTAP (Procedimentos SUS):**
+        * Exclusivo para as colunas do SIH (como `PROC_REA` e `PROC_SOLIC`), cruzando o código do SUS com a descrição de procedimentos, desde cirurgias complexas até consultas ambulatoriais.
+        """)
+
+    st.markdown("---")
+    st.header("2. ⚠️ Notas Técnicas e Limitações do DATASUS")
+    st.write("É fundamental compreender como o fluxo de dados do Ministério da Saúde funciona para evitar erros de análise:")
+
+    with st.expander("⏳ Atraso de Digitação e Consolidação (Lag)"):
+        st.markdown("""
+        Os dados de saúde pública no Brasil sofrem um atraso natural entre a ocorrência e a disponibilidade no sistema:
+        * **SIH (Internações):** É o sistema mais ágil (focado em faturamento). Atraso médio de **2 a 3 meses**.
+        * **SINAN (Agravos):** Varia por doença. Epidemias são rápidas, mas agravos crônicos podem levar até **6 meses** para chegar ao servidor federal.
+        * **SIM e SINASC (Óbitos e Nascimentos):** São os mais lentos devido à burocracia de cartórios e validações. Dados do ano corrente são sempre "Preliminares". A base consolidada pode levar até **2 anos** para ser fechada.
+        """)
+
+    with st.expander("🛑 Limitações Recentes do SINASC (A partir de 2021)"):
+        st.markdown("""
+        * **O que acontece:** O Ministério da Saúde reestruturou a forma de armazenar os dados de Nascidos Vivos no servidor FTP a partir de 2021 (devido a mudanças de formulário e LGPD).
+        * **Impacto na Extração:** A ferramenta PySUS pode não conseguir localizar as pastas recentes automaticamente no servidor raiz antigo.
+        * **Solução Alternativa:** Para dados de 2021 em diante, caso a extração retorne vazia, recomenda-se o download manual do `.csv` diretamente no **Portal de Dados Abertos do Governo Federal**.
+        """)
+        
+    st.markdown("---")
+    st.header("3. Como citar os dados (Padrão ABNT)")
+    st.info("Sempre que utilizar dados extraídos deste sistema em relatórios, TCCs ou artigos científicos, referencie a fonte primária governamental.")
+    
+    st.markdown("**Para dados do Ministério da Saúde (SIM, SINASC, SIH, SINAN, CNES):**")
+    st.code("BRASIL. Ministério da Saúde. Departamento de Informática do SUS – DATASUS. Microdados de Saúde. Brasília, DF. Disponível em: <http://datasus.saude.gov.br/>. Acesso em: [Data de hoje].", language="text")
+
+    st.markdown("**Para utilizar as rotinas de extração em Python (PySUS):**")
+    st.code("ROCHA, F. A. C. et al. PySUS: ferramenta em linguagem Python para extração e tabulação de dados em saúde. Rio de Janeiro, RJ. Disponível em: <https://github.com/AlertaDengue/PySUS>. Acesso em: [Data de hoje].", language="text")
