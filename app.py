@@ -45,7 +45,7 @@ MESES_NOMES = [
     "09 - Setembro", "10 - Outubro", "11 - Novembro", "12 - Dezembro"
 ]
 
-# --- 1. PUXANDO O JSON DE CONFIGURAÇÕES ---
+# --- 1. PUXANDO O JSON DE CONFIGURAÇÕES (GITHUB) ---
 @st.cache_data(show_spinner=False)
 def carregar_dicionarios_github():
     URL_RAW_GITHUB = "https://raw.githubusercontent.com/lorenahlna/gestao_territorial/refs/heads/main/dicionarios.json"
@@ -54,6 +54,7 @@ def carregar_dicionarios_github():
         res.raise_for_status()
         return res.json()
     except Exception as e:
+        st.warning(f"⚠️ Aviso: Usando dicionários de contingência (Falha ao ler JSON).")
         return {
             "CBO_ESPECIFICOS": {"2251": "Médicos clínicos", "2235": "Enfermeiros"},
             "CBO_SUBGRUPOS": {"01": "Forças Armadas", "11": "Dirigentes", "22": "Profissionais de Saúde"},
@@ -63,10 +64,11 @@ def carregar_dicionarios_github():
 
 CONFIG_APP = carregar_dicionarios_github()
 
-# --- 2. INTEGRAÇÃO DOS DICIONÁRIOS PESADOS ---
+# --- 2. INTEGRAÇÃO DOS DICIONÁRIOS PESADOS (CSV LOCAL E GITHUB) ---
 @st.cache_data(show_spinner=False)
 def carregar_tabelas_complementares():
     tabelas = {"CBO": {}, "CID10": {}, "SIGTAP": {}}
+    
     if os.path.exists("tabela_cid10_codigo_descricao.csv"):
         try:
             df_cid = pd.read_csv("tabela_cid10_codigo_descricao.csv", sep=";", dtype=str, encoding='utf-8', on_bad_lines='skip')
@@ -83,6 +85,7 @@ def carregar_tabelas_complementares():
         df_cbo = pd.read_csv(BASE_RAW_URL + "tabelas/cbo.csv", sep=";", dtype=str, encoding='utf-8')
         tabelas["CBO"] = dict(zip(df_cbo.iloc[:, 0], df_cbo.iloc[:, 1]))
     except: pass
+        
     try:
         df_sigtap = pd.read_csv(BASE_RAW_URL + "Referencias/tb_procedimento.csv", sep=";", dtype=str, encoding='utf-8')
         tabelas["SIGTAP"] = dict(zip(df_sigtap.iloc[:, 0], df_sigtap.iloc[:, 1]))
@@ -92,11 +95,11 @@ def carregar_tabelas_complementares():
 
 TABELAS_EXTERNAS = carregar_tabelas_complementares()
 
-# --- BLINDAGEM DE VARIÁVEIS E IMPORTS PÚBLICOS (PYSUS) ---
+# --- BLINDAGEM DE VARIÁVEIS DO PYSUS ---
 try:
-    from pysus import sim as api_sim, sih as api_sih, cnes as api_cnes, sinasc as api_sinasc, sinan as api_sinan, list_files
+    from pysus.api._impl.databases import sim as api_sim, sih as api_sih, cnes as api_cnes, sinasc as api_sinasc, sinan as api_sinan
 except ImportError:
-    api_sim = api_sih = api_cnes = api_sinasc = api_sinan = list_files = None
+    api_sim = api_sih = api_cnes = api_sinasc = api_sinan = None
 
 # --- FUNÇÕES DE METADADOS E TERRITÓRIO ---
 UFS = ["AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS","MG","PA","PB","PR","PE","PI","RJ","RN","RS","RO","RR","SC","SP","SE","TO"]
@@ -112,13 +115,16 @@ def buscar_municipios_por_uf(uf_sigla):
         return {"Belo Horizonte": {"id7": "3106200", "id6": "310620", "nome": "Belo Horizonte", "uf": "MG"}}
 
 # --- TRATADORES DE DADOS ---
-
 def normalizar_codigo(valor):
     if pd.isna(valor): return ""
     return str(valor).strip().replace(".0", "")
 
 def extrair_mes_datasus(serie):
-    s = (serie.astype(str).str.replace(r"\.0$", "", regex=True).str.replace("-", "", regex=False).str.replace("/", "", regex=False).str.strip())
+    s = (serie.astype(str)
+         .str.replace(r"\.0$", "", regex=True)
+         .str.replace("-", "", regex=False)
+         .str.replace("/", "", regex=False)
+         .str.strip())
     datas_aaaammdd = pd.to_datetime(s, format="%Y%m%d", errors="coerce")
     mes = datas_aaaammdd.dt.month
     faltantes = mes.isna()
@@ -236,36 +242,7 @@ def tratar_e_traduzir_df(df, sistema):
     df_tratado = df_tratado.rename(columns=cabecalhos.get(sigla_sistema, {}))
     return df_tratado
 
-# --- MOTOR DATASUS COM DEBUG SIH E GESTÃO DE MEMÓRIA ---
-
-def buscar_sih_corrigido(uf, ano, meses, grupo):
-    """
-    Novo fluxo SIH que aceita lista de meses e reduz loops indevidos.
-    """
-    print(f"[SIH RETORNO] Tentando UF={uf} | Ano={ano} | Meses={meses} | Grupo={grupo}")
-    try:
-        df = api_sih(state=uf, year=ano, month=meses, group=grupo, as_dataframe=True, show_progress=False)
-        print(f"[SIH RETORNO] Tipo={type(df)}")
-        if isinstance(df, pd.DataFrame):
-            print(f"[SIH RETORNO] Linhas={len(df)} | Colunas={list(df.columns)[:15]}")
-            return df.copy()
-        
-        # Tentativa secundária se não for DataFrame
-        arquivos = df if isinstance(df, list) else [df] if df is not None else []
-        dfs = []
-        for item in arquivos:
-            try:
-                caminho = os.fspath(item) if hasattr(item, "__fspath__") else str(item)
-                df_item = pd.read_parquet(caminho)
-                if not df_item.empty: dfs.append(df_item)
-            except Exception as ex:
-                print(f"[SIH ERRO] Falha lendo {item}: {ex}")
-        if dfs:
-            return pd.concat(dfs, ignore_index=True)
-            
-    except Exception as e:
-        print(f"[SIH ERRO] Falha geral: {e}")
-    return pd.DataFrame()
+# --- MOTOR DATASUS COM GESTÃO DE MEMÓRIA ---
 
 def processar_retorno_pysus(res):
     try:
@@ -288,44 +265,77 @@ def processar_retorno_pysus(res):
                     except: pass
             if frames: return pd.concat(frames, ignore_index=True)
     except Exception as e:
-        print(f"Erro processando arquivo genérico: {e}")
+        print(f"Erro processando arquivo: {e}")
     return pd.DataFrame()
+
+def buscar_sih_seguro(uf, ano, mes, grupo):
+    """
+    🌟 CORREÇÃO DO SIH: Usa HTTP/Parquet nativo do PySUS online_data 
+    para burlar o bloqueio de FTP (Porta 21) da Nuvem do Streamlit.
+    """
+    print(f"[SIH] Tentando via online_data (HTTP Parquet) | {uf} {ano}/{mes} {grupo}")
+    try:
+        from pysus.online_data.SIH import download
+        res = download(states=[uf], years=[ano], months=[mes], groups=[grupo])
+        df = processar_retorno_pysus(res)
+        if not df.empty:
+            print(f"[SIH ONLINE DATA] Sucesso! Linhas: {len(df)}")
+            return df
+    except Exception as e:
+        print(f"[SIH ERRO online_data]: {e}")
+
+    # Fallback clássico caso o online_data falhe
+    combinacoes = [
+        {"state": uf, "year": ano, "month": mes, "groups": [grupo]},
+        {"state": uf, "year": ano, "month": mes, "group": grupo}
+    ]
+    for kwargs in combinacoes:
+        try:
+            res = api_sih(**kwargs)
+            df = processar_retorno_pysus(res)
+            if not df.empty: return df
+        except: continue
+        
+    return pd.DataFrame()
+
 
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo=""):
     if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     
-    partes_final = [] 
+    partes_final = [] # O SEGREDO DA MEMÓRIA: Evita concatenação progressiva gigante
     meses_para_baixar = [mes_num] if mes_num else list(range(1, 13))
+
     cols_alvo = obter_colunas_municipio(sistema, sih_grupo)
     dt_alvos = ["DTOBITO", "DTNASC", "DT_NOTIFIC"]
+    
     falhas = []
     sucessos_download = 0
 
     for uf in ufs_lista:
         resultados = []
-        df_temp = pd.DataFrame()
-        
-        # Extração
-        if "SIH" in sistema:
-            df_temp = buscar_sih_corrigido(uf, ano, meses_para_baixar, sih_grupo)
-            if not df_temp.empty:
-                resultados.append(df_temp)
-                sucessos_download += 1
-            else:
-                falhas.append(f"SIH VAZIO | {uf} {ano}")
-                
-        elif "CNES" in sistema:
+        if "SIH" in sistema or "CNES" in sistema:
             for m in meses_para_baixar:
+                df_temp = pd.DataFrame()
                 try:
-                    res = api_cnes(state=uf, year=ano, month=m, group=cnes_grupo)
-                    df_m = processar_retorno_pysus(res)
-                    if not df_m.empty:
-                        resultados.append(df_m)
-                        sucessos_download += 1
+                    if "SIH" in sistema:
+                        df_temp = buscar_sih_seguro(uf, ano, m, sih_grupo)
+                    elif "CNES" in sistema:
+                        try: res = api_cnes(state=uf, year=ano, month=m, group=cnes_grupo)
+                        except TypeError: res = api_cnes(state=uf, year=ano, month=m, groups=[cnes_grupo])
+                        df_temp = processar_retorno_pysus(res)
                 except Exception as e:
-                    falhas.append(f"CNES | {uf} {ano}/{m:02d}: {e}")
+                    falhas.append(f"Download Error {sistema} | {uf} {ano}/{m:02d}: {e}")
+                    continue
+
+                if not df_temp.empty:
+                    print(f"[OK] Download {sistema} | UF={uf} | Ano={ano}/{m:02d} | Linhas: {len(df_temp)}")
+                    resultados.append(df_temp)
+                    sucessos_download += 1
+                else:
+                    falhas.append(f"{sistema} VAZIO | {uf} {ano}/{m:02d}")
                     
         else:
+            df_temp = pd.DataFrame()
             try:
                 if "SIM" in sistema: 
                     res = api_sim(state=uf, year=ano)
@@ -339,15 +349,16 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                     df_temp = processar_retorno_pysus(res)
             except Exception as e:
                 falhas.append(f"Download Error {sistema} | {uf} {ano}: {e}")
+                continue
 
             if not df_temp.empty:
-                print(f"[OK] Download {sistema} | UF={uf} | Ano={ano} | Linhas extraídas: {len(df_temp)}")
+                print(f"[OK] Download {sistema} | UF={uf} | Ano={ano} | Linhas: {len(df_temp)}")
                 resultados.append(df_temp)
                 sucessos_download += 1
             else:
                 falhas.append(f"{sistema} VAZIO | {uf} {ano}")
         
-        # Filtros de Dados Blindados
+        # Filtros Cegos Blindados com .copy() e .loc para proteger a Memória (SettingWithCopyWarning)
         for df_t in resultados:
             try:
                 df_t = df_t.copy()
@@ -363,12 +374,15 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                 if nivel_terr == "Município" and col_filtro_real:
                     df_t.loc[:, col_filtro_real] = df_t[col_filtro_real].apply(normalizar_codigo)
                     df_t = df_t[df_t[col_filtro_real].str.startswith(id_datasus_alvo)].copy()
-                    print(f"[FILTRO TERRITÓRIO] Mun={id_datasus_alvo} | Restantes: {len(df_t)}")
                 
                 if mes_num is not None and dt_col_real:
                     meses_extraidos = extrair_mes_datasus(df_t[dt_col_real])
                     df_t = df_t[meses_extraidos == mes_num].copy()
-                    print(f"[FILTRO MÊS] Mês={mes_num} | Restantes: {len(df_t)}")
+                
+                # 🌟 LIMITADOR DO SINAN: Reduz para as primeiras 50k linhas para evitar queda do App
+                if "SINAN" in sistema and not df_t.empty and len(df_t) > 50000:
+                    print(f"[SINAN ALERTA] Base enorme! Limitando para proteger o Streamlit...")
+                    df_t = df_t.head(50000)
                 
                 if not df_t.empty: 
                     partes_final.append(df_t)
@@ -378,14 +392,14 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                 continue
             
         del resultados
-        gc.collect()
+        gc.collect() # Limpa o lixo da RAM a cada UF processada
             
     if not partes_final:
         if sucessos_download == 0 and len(falhas) > 0:
-            print(f"[ERRO GERAL] Detalhes das falhas: {falhas}")
-            return pd.DataFrame({"Erro": [f"🛑 FALHA DE CONEXÃO. O DATASUS não retornou dados. Detalhes nos logs do terminal."]})
+            print(f"[ERRO GERAL] Detalhes: {falhas}")
+            return pd.DataFrame({"Erro": [f"🛑 FALHA DE CONEXÃO ou ARQUIVO INEXISTENTE. O DATASUS não retornou dados."]})
         else:
-            return pd.DataFrame({"Erro": ["⚠️ FALTA DE DADOS: A extração foi realizada, mas a tabela ficou vazia após a filtragem territorial/mensal."]})
+            return pd.DataFrame({"Erro": ["⚠️ FALTA DE DADOS: A extração foi realizada, mas a tabela ficou vazia após a filtragem."] })
     
     df_final = pd.concat(partes_final, ignore_index=True)
     return df_final
@@ -393,35 +407,6 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
 # --- INTERFACE PRINCIPAL ---
 
 st.sidebar.title("🧬 Navegação e Filtros")
-
-# 🌟 BOTÕES DE DEBUG EXCLUSIVOS DO SIH (Apenas no log do terminal/interface temporária)
-st.sidebar.markdown("---")
-st.sidebar.markdown("**🛠️ Depuração SIH**")
-if st.sidebar.button("🧪 Listar arquivos SIH"):
-    try:
-        if list_files:
-            arquivos = list_files("SIH", group="RD", state="MG", year=2024, month=1)
-            st.sidebar.write(f"Arquivos encontrados: {len(arquivos)}")
-            st.sidebar.dataframe(arquivos, width="stretch")
-        else:
-            st.sidebar.error("Função list_files não importada.")
-    except Exception as e:
-        st.sidebar.error(f"Erro ao listar: {repr(e)}")
-
-if st.sidebar.button("🧪 Teste SIH mínimo"):
-    try:
-        st.sidebar.write("Testando: MG, 2024, Janeiro, RD")
-        df_teste = api_sih(state="MG", year=2024, month=1, group="RD", as_dataframe=True, show_progress=False)
-        st.sidebar.write(f"Tipo do Retorno: {type(df_teste)}")
-        st.sidebar.write(f"Tamanho: {len(df_teste) if hasattr(df_teste, '__len__') else 0}")
-        if isinstance(df_teste, pd.DataFrame) and not df_teste.empty:
-            st.sidebar.dataframe(df_teste.head(5), width="stretch")
-        else:
-            st.sidebar.warning("Retornou vazio.")
-    except Exception as e:
-        st.sidebar.error(f"Erro no Teste: {repr(e)}")
-st.sidebar.markdown("---")
-
 aba_ativa = st.sidebar.radio("Navegar para:", ["📋 Guia Principal (Extração)", "📚 Dicionários e Citações"])
 
 if aba_ativa == "📋 Guia Principal (Extração)":
@@ -429,7 +414,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
     st.markdown('<div class="header-sidra"><h1>Central de Inteligência Territorial</h1><p>DATASUS conectado | SIDRA e VIS DATA 3 em desenvolvimento</p></div>', unsafe_allow_html=True)
 
     fonte = st.sidebar.radio("Base de Informação:", ["🏥 Saúde (DATASUS)", "🏠 Social (VIS DATA 3 - Indisponível)"])
-    
     if "VIS DATA 3" in fonte:
         st.warning("VIS DATA 3 ainda não está conectado nesta versão.")
         st.stop()
@@ -467,6 +451,9 @@ if aba_ativa == "📋 Guia Principal (Extração)":
         
         ano_sel = st.sidebar.selectbox("Ano de Referência:", listar_anos_disponiveis(sistema))
         
+        if "SINASC" in sistema and ano_sel >= 2021:
+            st.sidebar.warning("⚠️ **Aviso de Migração:** Os microdados de Nascidos Vivos após 2020 foram movidos para o Portal de Dados Abertos. A conexão nativa pode falhar.")
+            
         nome_mes = st.sidebar.selectbox("Mês de Competência/Ocorrência (Opcional):", MESES_NOMES)
         mes_sel = None if nome_mes == "Todos os Meses" else int(nome_mes.split(" - ")[0])
         
@@ -484,23 +471,24 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                     
                     st.markdown(f'<div class="metric-card"><h2>{len(df_bruto)} Registros Encontrados</h2><p>{sistema_titulo} - {nome_local} ({ano_sel})</p></div>', unsafe_allow_html=True)
                     
+                    if "SINAN" in sistema and len(df_tratado) >= 50000:
+                        st.warning("⚠️ **Limite de Memória Atingido:** O arquivo do SINAN é muito grande. Para evitar o travamento do aplicativo, os dados em tela foram limitados às primeiras 50.000 linhas e o Dashboard automático foi desativado. Por favor, baixe o arquivo `.csv` para análise local completa.")
+                    
                     tab1, tab2, tab3 = st.tabs(["✅ Planilha Tratada", "⚙️ Planilha Bruta", "📈 Painel de Análises (Dashboards)"])
                     
                     with tab1:
-                        # 🌟 PROTEÇÃO DE MEMÓRIA DE EXIBIÇÃO: Evita travar a UI com bases grandes (MAX 1000 linhas na prévia)
-                        st.dataframe(df_tratado.head(1000), width="stretch")
+                        st.dataframe(df_tratado.head(100), width="stretch")
                         st.download_button("📥 Baixar Tabela TRATADA (CSV)", df_tratado.to_csv(index=False, sep=';', decimal=','), f"tratado_{sistema_titulo}_{nome_local}.csv", "text/csv")
                     with tab2:
-                        st.dataframe(df_bruto.head(1000), width="stretch")
+                        st.dataframe(df_bruto.head(100), width="stretch")
                         st.download_button("📥 Baixar Tabela BRUTA (CSV)", df_bruto.to_csv(index=False, sep=';', decimal=','), f"bruto_{sistema_titulo}_{nome_local}.csv", "text/csv")
                         
                     with tab3:
-                        st.subheader(f"📊 Painel Analítico: {sistema_titulo}")
-                        
-                        # 🌟 PROTEÇÃO DE MEMÓRIA (SINAN)
-                        if "SINAN" in sistema and len(df_bruto) > 50000:
-                            st.warning("⚠️ Base SINAN muito grande (> 50k registros). Gráficos automáticos desativados para evitar queda do app. Baixe a planilha ou filtre um município específico.")
+                        # 🌟 TRAVA DE PROTEÇÃO: Não gerar gráficos para SINAN enorme
+                        if "SINAN" in sistema and len(df_tratado) >= 50000:
+                            st.info("📊 Os gráficos estão indisponíveis para esta extração devido ao alto volume de dados.")
                         else:
+                            st.subheader(f"📊 Painel Analítico: {sistema_titulo}")
                             if "SIH" in sistema:
                                 c1, c2, c3 = st.columns(3)
                                 for c_val in ["Valor Total AIH (R$)", "Valor UTI (R$)"]:
@@ -516,31 +504,21 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 c_sexo, c_morte = st.columns(2)
                                 with c_sexo:
                                     col_sexo = next((c for c in df_tratado.columns if "Sexo Paciente" in c), None)
-                                    if col_sexo:
-                                        st.write(f"**Distribuição por Sexo**")
-                                        st.bar_chart(df_tratado[col_sexo].value_counts())
+                                    if col_sexo: st.bar_chart(df_tratado[col_sexo].value_counts())
                                 with c_morte:
-                                    if "Desfecho (Alta/Óbito)" in df_tratado.columns:
-                                        st.write("**Desfecho da Internação**")
-                                        st.bar_chart(df_tratado["Desfecho (Alta/Óbito)"].value_counts())
+                                    if "Desfecho (Alta/Óbito)" in df_tratado.columns: st.bar_chart(df_tratado["Desfecho (Alta/Óbito)"].value_counts())
                                 
                                 c_a, c_b = st.columns(2)
                                 if "Procedimento Realizado (SIGTAP)" in df_tratado.columns:
-                                    with c_a:
-                                        st.write("**Top 10 Procedimentos Realizados**")
-                                        st.bar_chart(df_tratado["Procedimento Realizado (SIGTAP)"].value_counts().head(10))
+                                    with c_a: st.bar_chart(df_tratado["Procedimento Realizado (SIGTAP)"].value_counts().head(10))
                                 if "Diagnóstico Principal (CID-10)" in df_tratado.columns:
-                                    with c_b:
-                                        st.write("**Top 10 Causas de Internação (CID-10)**")
-                                        st.bar_chart(df_tratado["Diagnóstico Principal (CID-10)"].value_counts().head(10))
+                                    with c_b: st.bar_chart(df_tratado["Diagnóstico Principal (CID-10)"].value_counts().head(10))
                                     
                             elif "SINASC" in sistema:
                                 st.write("### Perfil da Mãe")
                                 c1, c2 = st.columns(2)
                                 with c1:
-                                    if "Faixa Etária da Mãe" in df_tratado.columns:
-                                        st.write("**Idade das Mães no Parto**")
-                                        st.bar_chart(df_tratado["Faixa Etária da Mãe"].value_counts().sort_index())
+                                    if "Faixa Etária da Mãe" in df_tratado.columns: st.bar_chart(df_tratado["Faixa Etária da Mãe"].value_counts().sort_index())
                                 with c2:
                                     if "Escolaridade Mãe (2010)" in df_tratado.columns:
                                         st.write(f"**Escolaridade Mãe (2010)**")
