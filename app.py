@@ -1,4 +1,4 @@
-# VERSAO_VALIDADA_V5_FILTRO_PREFIXO_ESTRITO_PRESENTE
+# VERSAO_VALIDADA_V6_PREFIXO_TEMPORAL_ESTRITO_PRESENTE
 import streamlit as st
 import pandas as pd
 import requests
@@ -191,7 +191,73 @@ def leitura_segura_parquet(caminho, limite=50000):
         print(f"[ERRO LEITURA SEGURA] {repr(e)}")
         return pd.DataFrame()
 
-# --- 🌟 CORREÇÃO TÉCNICA 1 E 2: INCLUSÃO DE PREFIXO_ESPERADO E QUERIES CORRIGIDAS ---
+# --- 🌟 ADICIONADO: FUNÇÕES AUXILIARES DE NORMALIZAÇÃO E FILTRAGEM ESTRITA DE TOKENS SIH ---
+def normalizar_lista_arquivos_pysus(res):
+    if res is None:
+        return []
+    if isinstance(res, pd.DataFrame):
+        return res
+    if isinstance(res, str):
+        return [res]
+    if isinstance(res, list):
+        caminhos = []
+        for item in res:
+            if isinstance(item, str):
+                caminhos.append(item)
+            elif hasattr(item, "__fspath__"):
+                caminhos.append(os.fspath(item))
+            elif hasattr(item, "path"):
+                caminhos.append(str(item.path))
+            else:
+                caminhos.append(str(item))
+        return caminhos
+    if hasattr(res, "__fspath__"):
+        return [os.fspath(res)]
+    if hasattr(res, "path"):
+        return [str(res.path)]
+    return [str(res)]
+
+def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
+    if isinstance(arquivos, pd.DataFrame):
+        return arquivos
+    ano2 = str(ano)[-2:]
+    mes2 = f"{int(mes):02d}"
+    prefixo_exato = f"{grupo}{uf}{ano2}{mes2}".upper()
+    
+    selecionados = []
+    rejeitados = []
+    
+    for caminho in arquivos:
+        nome = os.path.basename(str(caminho)).upper()
+        if nome.startswith(prefixo_exato):
+            selecionados.append(caminho)
+        else:
+            rejeitados.append(nome)
+            
+    if rejeitados:
+        print(f"[SIH ARQUIVOS REJEITADOS] Esperado prefixo {prefixo_exato}. Arquivos rejeitados: {rejeitados}")
+    if selecionados:
+        print(f"[SIH ARQUIVOS VALIDOS] Prefixo {prefixo_exato}. Arquivos aceitos: {selecionados}")
+        
+    return selecionados
+
+def baixar_sih_seguro_pysus23(uf, ano, mes, grupo):
+    if grupo == "CM":
+        print("[SIH CM BLOQUEADO] O grupo CM não será processado como UF/mês nesta versão. O notebook validado usa fluxo FTP e recorte nacional de 2019.")
+        return pd.DataFrame({
+            "Erro": ["O grupo SIH/CM não está disponível de forma confiável para consulta mensal por UF/município nesta versão. Use RD para internações ou SP para serviços profissionais."]
+        })
+    try:
+        res = api_sih(state=uf, year=int(ano), month=int(mes), group=grupo, show_progress=True)
+        arquivos = normalizar_lista_arquivos_pysus(res)
+        if isinstance(arquivos, pd.DataFrame):
+            return arquivos
+        return filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo)
+    except Exception as e:
+        print(f"[SIH ERRO API 2.3] {uf} {ano}/{mes} grupo={grupo}: {repr(e)}")
+        return []
+
+# --- 🌟 MOTOR DUCKDB ADAPTADO COM REGRAS ESTRITAS DE VALIDAÇÃO DE TOKENS COMPLETOS ---
 def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado="Amostra limitada de microdados", prefixo_esperado=None):
     if cols_alvo is None: cols_alvo = []
     arquivos_lidos = 0
@@ -214,12 +280,11 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
             for r in res:
                 caminho = os.fspath(r) if hasattr(r, "__fspath__") else str(r)
                 if caminho.endswith('.parquet'):
-                    # Validation of Prefix Estrito
                     nome_arquivo = os.path.basename(caminho).upper()
                     if prefixo_esperado:
                         prefixo = str(prefixo_esperado).upper()
                         if not nome_arquivo.startswith(prefixo):
-                            print(f"[ARQUIVO IGNORADO] Grupo selecionado={prefixo}. Arquivo recebido={nome_arquivo}. O arquivo foi ignorado para evitar resultado de grupo errado.")
+                            print(f"[ARQUIVO IGNORADO] Grupo/Período selecionado={prefixo}. Arquivo recebido={nome_arquivo}. Ignorado para evitar vazamento.")
                             continue
                             
                     arquivos_lidos += 1
@@ -229,7 +294,6 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
                         col_filtro = next((c for c in cols_parquet if c.upper() in [x.upper() for x in cols_alvo]), None)
                         
                         if id_alvo and col_filtro and nivel_terr == "Município":
-                            # Queries reformatted according to requirements rules: single quotes for paths/literals, double quotes for columns
                             query = f"SELECT * FROM read_parquet('{caminho}') WHERE CAST(\"{col_filtro}\" AS VARCHAR) LIKE '{id_alvo}%'"
                             df = duckdb.query(query).df()
                             print(f"[DUCKDB SQL] Arquivo '{caminho}' filtrado por código territorial '{id_alvo}'. Linhas extraídas: {len(df)}")
@@ -262,7 +326,7 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
         print(f"[ERRO processar_retorno_pysus] {repr(e)}")
     return pd.DataFrame(), arquivos_lidos
 
-# --- MOTOR DATASUS ATUALIZADO ---
+# --- MOTOR DATASUS REESTRUTURADO ---
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo="", tipo_resultado=""):
     if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     
@@ -281,18 +345,15 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                 df_temp = pd.DataFrame()
                 arquivos_lidos = 0
                 try:
+                    # 🌟 CORREÇÃO TÉCNICA: Acionamento cirúrgico de baixar_sih_seguro_pysus23 com tokenização estrita de tokens chronos
                     if "SIH" in sistema:
-                        # 🌟 CORREÇÃO TÉCNICA 6: RASTREAMENTO SEQUENCIAL EXAUSTIVO SEM TRAVA PRECOCE POR ARQUIVOS_LIDOS
-                        combinacoes = [
-                            {"state": uf, "year": ano, "month": m, "group": sih_grupo},
-                            {"state": uf, "year": ano, "month": m, "groups": [sih_grupo]}
-                        ]
-                        for kwargs in combinacoes:
-                            try:
-                                res = api_sih(**kwargs)
-                                df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado, prefixo_esperado=sih_grupo)
-                                if not df_temp.empty: break
-                            except: continue
+                        res = baixar_sih_seguro_pysus23(uf, ano, m, sih_grupo)
+                        if isinstance(res, pd.DataFrame) and "Erro" in res.columns:
+                            return res
+                        df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
+                            res, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado,
+                            prefixo_esperado=f"{sih_grupo}{uf}{str(ano)[-2:]}{int(m):02d}"
+                        )
                     elif "CNES" in sistema:
                         try: res = api_cnes(state=uf, year=ano, month=m, group=cnes_grupo)
                         except: res = None
@@ -510,18 +571,22 @@ if aba_ativa == "📋 Guia Principal (Extração)":
             nome_agravo = st.sidebar.selectbox("Doença/Agravo:", sorted(list(mapa_doencas.keys())))
             agravo_sel = mapa_doencas[nome_agravo]
         elif "SIH" in sistema:
-            # 🌟 CORREÇÃO TÉCNICA 3: MAPA SIH ATUALIZADO CONFORME NOMENCLATURA EXIGIDA
+            # 🌟 CORREÇÃO TÉCNICA: Rótulos e Avisos de Metodologia para Grupos Diferentes de RD
             mapa_sih = {
                 "RD - Registros de Internações / AIH Reduzida (padrão)": "RD",
                 "SP - Serviços Profissionais (não representa nº de internações)": "SP",
                 "ER - Emergência Referenciada (experimental)": "ER",
-                "CM - Cirurgias Ambulatoriais (experimental)": "CM"
+                "CM - Cirurgias Ambulatoriais (não habilitado para consulta UF/mês nesta versão)": "CM"
             }
             sih_grupo_sel = mapa_sih[st.sidebar.selectbox("Grupo de Dados (SIH):", list(mapa_sih.keys()))]
             if sih_grupo_sel != "RD":
                 st.sidebar.warning(
                     "Este grupo do SIH não deve ser interpretado como número de internações. "
-                    "O app processará somente arquivos com o prefixo do grupo selecionado."
+                    "O app processará somente arquivos com o prefixo exato do grupo, UF, ano e mês selecionados."
+                )
+            if sih_grupo_sel == "CM":
+                st.sidebar.warning(
+                    "O grupo CM foi mantido na interface, mas não será processado como consulta mensal por UF/município nesta versão."
                 )
         elif "CNES" in sistema:
             mapa_cnes = {"ST - Estabelecimentos": "ST", "PF - Profissionais": "PF", "SR - Serviços": "SR", "HB - Habilitações": "HB", "IN - Incentivos": "IN", "EP - Estabelecimento por Procedimento": "EP", "EQ - Equipamentos": "EQ", "LT - Leitos": "LT", "DC - Dados Complementares": "DC"}
@@ -560,7 +625,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             df_tratado = tratar_e_traduzir_df(df_bruto, sistema)
                             sistema_titulo = f"SINAN ({nome_agravo})" if "SINAN" in sistema else f"SIH ({sih_grupo_sel})" if "SIH" in sistema else f"CNES ({cnes_grupo_sel})" if "CNES" in sistema else sistema.split(" (")[0]
                         
-                        # 🌟 CORREÇÃO TÉCNICA 4: ATUALIZAÇÃO DO CARD DE RESULTADO COM RÓTULO DE PERÍODO TRATADO
+                        # 🌟 CORREÇÃO TÉCNICA: Card de métrica estruturado com rótulo de período temporal exato
                         periodo_label = f"{mes_sel:02d}/{ano_sel}" if mes_sel else f"{ano_sel}"
                         st.markdown(
                             f'<div class="metric-card"><h2>{len(df_bruto)} Registros Processados</h2><p>{sistema_titulo} - {nome_local} ({periodo_label})</p></div>',
@@ -599,7 +664,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     
                                     c_sexo, c_morte = st.columns(2)
                                     with c_sexo:
-                                        col_sexo = next((c for c in df_tratado.columns if "Sexo Paciente" in c), None)
+                                        col_sexo = next((c Gems for c in df_tratado.columns if "Sexo Paciente" in c), None)
                                         if col_sexo: st.bar_chart(df_tratado[col_sexo].value_counts())
                                     with c_morte:
                                         if "Desfecho (Alta/Óbito)" in df_tratado.columns: st.bar_chart(df_tratado["Desfecho (Alta/Óbito)"].value_counts())
@@ -702,11 +767,17 @@ elif aba_ativa == "📚 Dicionários e Citações":
         """)
 
     with st.expander("🛏️ SIH (Sistema de Informações Hospitalares)"):
+        # 🌟 ADICIONADO: NOTAS TÉCNICAS E METODOLÓGICAS COMPLETAS SOBRE A FRAGILIDADE DOS GRUPOS CM, ER E SP NO EXPANDER DO SIH
         st.markdown("""
-        * **Resumo:** Dados de internações hospitalares pelo SUS. A tabela do tipo RD (AIH Reduzida) contém o resumo clínico e financeiro da internação.
+        * **Resumo:** Dados de internações hospitalares e faturamentos vinculados pelo SUS. A tabela do tipo RD (AIH Reduzida) é o padrão-ouro e contém o resumo clínico e financeiro completo da internação do paciente.
         * **DIAG_PRINC / DIAG_SECUN:** Diagnósticos registrados em formato CID-10, passíveis de mapeamento automático.
         * **PROC_REA / PROC_SOLIC:** Procedimentos realizados e solicitados. Cruzados automaticamente com a tabela SIGTAP.
         * **CGC_HOSP:** Identificação do hospital que pode ser relacionada ao Cadastro Nacional de Estabelecimentos (CNES).
+        
+        ⚠️ **Nota Metodológica sobre os Grupos Internos (RD, SP, ER, CM):**
+        * **Grupo RD (AIH Reduzida):** Representa o número real de internações puras e consolidadas (pacientes que ocuparam leitos hospitalares). Deve ser a base primária de qualquer pesquisa científica.
+        * **Grupo SP (Serviços Profissionais):** Contém registros de repasses financeiros específicos efetuados a médicos e profissionais envolvidos. Um único paciente (uma única AIH do grupo RD) pode gerar múltiplos registros repetidos no grupo SP. Portanto, **nunca conte linhas do grupo SP como número de pacientes ou de internações**, pois haverá superestimativa inflacionada.
+        * **Grupos ER (Emergência Referenciada) e CM (Cirurgias Ambulatoriais):** São considerados **altamente experimentais e instáveis**. Historicamente, os hospitais brasileiros preferem faturar procedimentos cirúrgicos de curta permanência (alta no mesmo dia) e atendimentos de pronto-socorro através do **SIA (Sistema de Informações Ambulatoriais)** via guias de APAC ou BPA para acelerar glosas. Consequentemente, as tabelas CM e ER no SIH sofrem de subnotificação endêmica crônica, flutuando conforme portarias federais e programas municipais temporários de mutirão.
         """)
 
     with st.expander("💀 SIM (Sistema de Informações sobre Mortalidade)"):
@@ -742,7 +813,7 @@ elif aba_ativa == "📚 Dicionários e Citações":
         st.markdown("""
         O sistema consulta os dicionários consolidados do repositório *cartaproale* no GitHub para alta performance na tradução de chaves técnicas:
         **1. CBO-2002 (Classificação Brasileira de Ocupações):**
-        * Realiza o mapeamento exato das profissões através da tabela oficial.
+        * Realiza o mapeamento exato das profissões através della tabela oficial.
         **2. CID-10 (Doenças):**
         * Extrai o significado clínico exato dos códigos presentes nas colunas `CAUSABAS` (SIM) ou `DIAG_PRINC` (SIH).
         **3. SIGTAP (Procedimentos SUS):**
