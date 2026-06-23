@@ -428,7 +428,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
         
         ano_sel = st.sidebar.selectbox("Ano de Referência:", listar_anos_disponiveis())
         
-        # ⚠️ ALERTA DO SINASC
         if sistema == "Nascimentos (SINASC)" and ano_sel > 2020:
             st.warning("⚠️ **Atenção:** Em 2011 o SINASC sofreu alterações e, para dados de 2021 em diante, a estrutura do FTP do Governo Federal foi modificada. A extração oficial (PySUS) pode apresentar instabilidade ou retornar vazia para anos recentes.")
             
@@ -453,9 +452,10 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                         sistema_titulo = sistema.split(" (")[0]
                     
                     st.markdown(f'<div class="metric-card"><h2>{len(df_bruto)} Registros Encontrados</h2><p>{sistema_titulo} - {nome_local} ({ano_sel})</p></div>', unsafe_allow_html=True)
-                    st.info("💡 Apenas as primeiras 100 linhas são exibidas abaixo. Use os botões para exportar a base completa.")
+                    st.info("💡 Navegue pelas abas abaixo para visualizar as planilhas ou o Painel Dinâmico de Gráficos.")
                     
-                    tab1, tab2 = st.tabs(["✅ Dados Tratados", "⚙️ Dados Brutos )"])
+                    # 🌟 INCLUÍDA A NOVA ABA DE DASHBOARDS
+                    tab1, tab2, tab3 = st.tabs(["✅ Planilha Tratada", "⚙️ Planilha Bruta", "📈 Painel de Análises (Dashboards)"])
                     
                     with tab1:
                         st.dataframe(df_tratado.head(100), use_container_width=True)
@@ -464,6 +464,55 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                     with tab2:
                         st.dataframe(df_bruto.head(100), use_container_width=True)
                         st.download_button("📥 Baixar Tabela BRUTA Completa (CSV)", df_bruto.to_csv(index=False, sep=';', decimal=','), f"bruto_{sistema_titulo}_{nome_local}.csv", "text/csv", use_container_width=True)
+                        
+                    # 🌟 A MÁGICA DOS GRÁFICOS ACONTECE AQUI
+                    with tab3:
+                        st.subheader(f"📊 Painel Analítico: {sistema_titulo}")
+                        
+                        if "SIH" in sistema:
+                            # 🛏️ PAINEL DE GESTÃO HOSPITALAR (SIH)
+                            col_a, col_b = st.columns(2)
+                            
+                            if "Valor Pago (R$)" in df_tratado.columns:
+                                df_tratado["Valor Numérico"] = pd.to_numeric(df_tratado["Valor Pago (R$)"].astype(str).str.replace(',', '.'), errors='coerce')
+                                custo_total = df_tratado["Valor Numérico"].sum()
+                                col_a.metric("💰 Custo Total Pago (SUS)", f"R$ {custo_total:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                            
+                            if "Procedimento Realizado (SIGTAP)" in df_tratado.columns:
+                                st.write("**Top 10 Procedimentos Hospitalares Mais Realizados**")
+                                top_proc = df_tratado["Procedimento Realizado (SIGTAP)"].value_counts().head(10)
+                                st.bar_chart(top_proc)
+                                
+                            if "Causa Básica (CID-10)" in df_tratado.columns or "Diagnóstico Principal (CID-10)" in df_tratado.columns:
+                                col_doenca = "Causa Básica (CID-10)" if "Causa Básica (CID-10)" in df_tratado.columns else "Diagnóstico Principal (CID-10)"
+                                st.write(f"**Top 10 Diagnósticos ({col_doenca})**")
+                                top_cid = df_tratado[col_doenca].value_counts().head(10)
+                                st.bar_chart(top_cid)
+                                
+                        elif "CNES" in sistema:
+                            # 🏥 PAINEL DE INFRAESTRUTURA (CNES)
+                            st.write("📈 *O Painel Gráfico prioriza bases epidemiológicas (SIM/SINAN) e econômicas (SIH). Explore os dados estruturais do CNES diretamente nas abas de Planilha.*")
+                            
+                        else:
+                            # 👤 PAINEL EPIDEMIOLÓGICO E DEMOGRÁFICO (SINAN, SIM, SINASC)
+                            col_a, col_b = st.columns(2)
+                            
+                            col_sexo = [c for c in df_tratado.columns if "Sexo" in c]
+                            if col_sexo:
+                                with col_a:
+                                    st.write(f"**Distribuição por {col_sexo[0]}**")
+                                    st.bar_chart(df_tratado[col_sexo[0]].value_counts())
+                            
+                            col_raca = [c for c in df_tratado.columns if "Raça" in c]
+                            if col_raca:
+                                with col_b:
+                                    st.write(f"**Distribuição por {col_raca[0]}**")
+                                    st.bar_chart(df_tratado[col_raca[0]].value_counts())
+                            
+                            col_evol = [c for c in df_tratado.columns if "Evolução" in c or "Circunstância" in c or "Tipo Parto" in c]
+                            if col_evol:
+                                st.write(f"**Desfecho ({col_evol[0]})**")
+                                st.bar_chart(df_tratado[col_evol[0]].value_counts())
                 else:
                     mensagem_erro = df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados."
                     if "FALHA DE CONEXÃO" in mensagem_erro:
