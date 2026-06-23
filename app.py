@@ -29,8 +29,6 @@ st.markdown("""
 @st.cache_data
 def listar_anos_disponiveis(sistema="GERAL"):
     ano_atual = datetime.now().year
-    
-    # 🌟 CORREÇÃO: Limites temporais atualizados para evitar requisições vazias de anos recentes
     limites = {
         "Mortalidade (SIM)": (1979, 2024),
         "Nascimentos (SINASC)": (1994, 2019),
@@ -47,7 +45,7 @@ MESES_NOMES = [
     "09 - Setembro", "10 - Outubro", "11 - Novembro", "12 - Dezembro"
 ]
 
-# --- 1. PUXANDO O JSON DE CONFIGURAÇÕES (GITHUB) ---
+# --- 1. PUXANDO O JSON DE CONFIGURAÇÕES ---
 @st.cache_data(show_spinner=False)
 def carregar_dicionarios_github():
     URL_RAW_GITHUB = "https://raw.githubusercontent.com/lorenahlna/gestao_territorial/refs/heads/main/dicionarios.json"
@@ -56,7 +54,6 @@ def carregar_dicionarios_github():
         res.raise_for_status()
         return res.json()
     except Exception as e:
-        st.warning(f"⚠️ Aviso: Usando dicionários de contingência (Falha ao ler JSON).")
         return {
             "CBO_ESPECIFICOS": {"2251": "Médicos clínicos", "2235": "Enfermeiros"},
             "CBO_SUBGRUPOS": {"01": "Forças Armadas", "11": "Dirigentes", "22": "Profissionais de Saúde"},
@@ -66,11 +63,10 @@ def carregar_dicionarios_github():
 
 CONFIG_APP = carregar_dicionarios_github()
 
-# --- 2. INTEGRAÇÃO DOS DICIONÁRIOS PESADOS (CSV LOCAL E GITHUB) ---
+# --- 2. INTEGRAÇÃO DOS DICIONÁRIOS PESADOS ---
 @st.cache_data(show_spinner=False)
 def carregar_tabelas_complementares():
     tabelas = {"CBO": {}, "CID10": {}, "SIGTAP": {}}
-    
     if os.path.exists("tabela_cid10_codigo_descricao.csv"):
         try:
             df_cid = pd.read_csv("tabela_cid10_codigo_descricao.csv", sep=";", dtype=str, encoding='utf-8', on_bad_lines='skip')
@@ -80,15 +76,13 @@ def carregar_tabelas_complementares():
                 tabelas["CID10"] = dict(zip(df_cid["codigo_datasus"], df_cid["descricao"]))
             else:
                 tabelas["CID10"] = dict(zip(df_cid.iloc[:, 0].str.strip().str.upper(), df_cid.iloc[:, 1].str.strip()))
-        except Exception as e:
-            st.sidebar.warning(f"Erro ao ler CID local: {e}")
+        except: pass
             
     BASE_RAW_URL = "https://raw.githubusercontent.com/cartaproale/PySUS/main/"
     try:
         df_cbo = pd.read_csv(BASE_RAW_URL + "tabelas/cbo.csv", sep=";", dtype=str, encoding='utf-8')
         tabelas["CBO"] = dict(zip(df_cbo.iloc[:, 0], df_cbo.iloc[:, 1]))
     except: pass
-        
     try:
         df_sigtap = pd.read_csv(BASE_RAW_URL + "Referencias/tb_procedimento.csv", sep=";", dtype=str, encoding='utf-8')
         tabelas["SIGTAP"] = dict(zip(df_sigtap.iloc[:, 0], df_sigtap.iloc[:, 1]))
@@ -98,11 +92,11 @@ def carregar_tabelas_complementares():
 
 TABELAS_EXTERNAS = carregar_tabelas_complementares()
 
-# --- BLINDAGEM DE VARIÁVEIS DO PYSUS ---
+# --- BLINDAGEM DE VARIÁVEIS E IMPORTS PÚBLICOS (PYSUS) ---
 try:
-    from pysus.api._impl.databases import sim as api_sim, sih as api_sih, cnes as api_cnes, sinasc as api_sinasc, sinan as api_sinan
+    from pysus import sim as api_sim, sih as api_sih, cnes as api_cnes, sinasc as api_sinasc, sinan as api_sinan, list_files
 except ImportError:
-    api_sim = api_sih = api_cnes = api_sinasc = api_sinan = None
+    api_sim = api_sih = api_cnes = api_sinasc = api_sinan = list_files = None
 
 # --- FUNÇÕES DE METADADOS E TERRITÓRIO ---
 UFS = ["AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS","MG","PA","PB","PR","PE","PI","RJ","RN","RS","RO","RR","SC","SP","SE","TO"]
@@ -124,15 +118,9 @@ def normalizar_codigo(valor):
     return str(valor).strip().replace(".0", "")
 
 def extrair_mes_datasus(serie):
-    s = (serie.astype(str)
-         .str.replace(r"\.0$", "", regex=True)
-         .str.replace("-", "", regex=False)
-         .str.replace("/", "", regex=False)
-         .str.strip())
-    
+    s = (serie.astype(str).str.replace(r"\.0$", "", regex=True).str.replace("-", "", regex=False).str.replace("/", "", regex=False).str.strip())
     datas_aaaammdd = pd.to_datetime(s, format="%Y%m%d", errors="coerce")
     mes = datas_aaaammdd.dt.month
-    
     faltantes = mes.isna()
     if faltantes.any():
         datas_ddmmaaaa = pd.to_datetime(s[faltantes], format="%d%m%Y", errors="coerce")
@@ -179,12 +167,10 @@ def agrupar_idade_mae(idade_str):
 def decodificar_cbo(codigo):
     cod_str = normalizar_codigo(codigo).zfill(6)
     if cod_str in ['', '000000', '999999']: return "Não informado"
-    
     dict_cbo = TABELAS_EXTERNAS.get("CBO", {})
     if dict_cbo:
         if cod_str in dict_cbo: return f"{cod_str} - {dict_cbo[cod_str]}"
         if cod_str[:4] in dict_cbo: return f"{cod_str} - {dict_cbo[cod_str[:4]]}"
-        
     cbo_esp = CONFIG_APP.get("CBO_ESPECIFICOS", {})
     if cod_str[:4] in cbo_esp: return f"{cod_str} - {cbo_esp[cod_str[:4]]}"
     return f"{cod_str} - {CONFIG_APP.get('CBO_SUBGRUPOS', {}).get(cod_str[:2], 'Outros')}"
@@ -200,8 +186,7 @@ def decodificar_cid(codigo, dict_cid):
 def decodificar_sigtap(codigo, dict_sigtap):
     cod = normalizar_codigo(codigo).zfill(10)
     if not cod or cod == '0000000000': return "Não informado"
-    if dict_sigtap and cod in dict_sigtap:
-        return f"{cod} - {dict_sigtap[cod]}"
+    if dict_sigtap and cod in dict_sigtap: return f"{cod} - {dict_sigtap[cod]}"
     return cod
 
 def tratar_e_traduzir_df(df, sistema):
@@ -238,7 +223,6 @@ def tratar_e_traduzir_df(df, sistema):
     for col in ["PROC_REA", "PROC_SOLIC"]:
         if col in df_tratado.columns: df_tratado.loc[:, col] = df_tratado[col].apply(lambda x: decodificar_sigtap(x, dict_sigtap))
 
-    # Aplicação de Dicionários com Normalização Segura
     for coluna, de_para in dic_dinamico.get(sigla_sistema, {}).items():
         if coluna in df_tratado.columns:
             df_tratado.loc[:, coluna] = df_tratado[coluna].apply(normalizar_codigo).map(de_para).fillna("Ignorado/Outros")
@@ -252,44 +236,35 @@ def tratar_e_traduzir_df(df, sistema):
     df_tratado = df_tratado.rename(columns=cabecalhos.get(sigla_sistema, {}))
     return df_tratado
 
-# --- MOTOR DATASUS COM DEBUG E GESTÃO DE MEMÓRIA ---
+# --- MOTOR DATASUS COM DEBUG SIH E GESTÃO DE MEMÓRIA ---
 
-def buscar_sih_seguro(uf, ano, mes, grupo):
+def buscar_sih_corrigido(uf, ano, meses, grupo):
     """
-    🌟 CORREÇÃO PRIORITÁRIA DO SIH: 
-    Rotina robusta que diagnostica e extrai o SIH lidando corretamente com Objetos Path e Listas.
+    Novo fluxo SIH que aceita lista de meses e reduz loops indevidos.
     """
-    print(f"[SIH TESTE] Iniciando | UF={uf} | Ano={ano} | Mes={mes:02d} | Grupo={grupo}")
-    
+    print(f"[SIH RETORNO] Tentando UF={uf} | Ano={ano} | Meses={meses} | Grupo={grupo}")
     try:
-        res = api_sih(state=uf, year=ano, month=mes, group=grupo, as_dataframe=True, show_progress=False)
-        if isinstance(res, pd.DataFrame) and not res.empty:
-            print(f"[SIH TESTE] Sucesso Direto | Linhas: {len(res)}")
-            return res
-    except Exception as e:
-        print(f"[SIH ERRO] Tentativa as_dataframe falhou: {e}")
-
-    try:
-        res = api_sih(state=uf, year=ano, month=mes, group=grupo, show_progress=False)
-        arquivos = res if isinstance(res, list) else [res] if res is not None else []
-        dfs = []
+        df = api_sih(state=uf, year=ano, month=meses, group=grupo, as_dataframe=True, show_progress=False)
+        print(f"[SIH RETORNO] Tipo={type(df)}")
+        if isinstance(df, pd.DataFrame):
+            print(f"[SIH RETORNO] Linhas={len(df)} | Colunas={list(df.columns)[:15]}")
+            return df.copy()
         
+        # Tentativa secundária se não for DataFrame
+        arquivos = df if isinstance(df, list) else [df] if df is not None else []
+        dfs = []
         for item in arquivos:
             try:
                 caminho = os.fspath(item) if hasattr(item, "__fspath__") else str(item)
-                df = pd.read_parquet(caminho)
-                if not df.empty: 
-                    dfs.append(df)
-            except Exception as e:
-                print(f"[SIH ERRO] Falha ao ler Path/Parquet: {e}")
-                
+                df_item = pd.read_parquet(caminho)
+                if not df_item.empty: dfs.append(df_item)
+            except Exception as ex:
+                print(f"[SIH ERRO] Falha lendo {item}: {ex}")
         if dfs:
-            print(f"[SIH TESTE] Sucesso via Leitura de Disco | Blocos: {len(dfs)}")
             return pd.concat(dfs, ignore_index=True)
             
     except Exception as e:
-        print(f"[SIH ERRO] Retorno padrão falhou: {e}")
-
+        print(f"[SIH ERRO] Falha geral: {e}")
     return pd.DataFrame()
 
 def processar_retorno_pysus(res):
@@ -297,6 +272,8 @@ def processar_retorno_pysus(res):
         if isinstance(res, pd.DataFrame): return res.copy()
         if hasattr(res, 'to_pandas'): return res.to_pandas().copy()
         if isinstance(res, str):
+            if res.endswith('.parquet'): return pd.read_parquet(res)
+            if res.endswith('.csv'): return pd.read_csv(res)
             try: return pd.read_parquet(res)
             except: pass
             
@@ -317,37 +294,38 @@ def processar_retorno_pysus(res):
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo=""):
     if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     
-    partes_final = [] # 🌟 CORREÇÃO DE MEMÓRIA: Evita concatenação progressiva
+    partes_final = [] 
     meses_para_baixar = [mes_num] if mes_num else list(range(1, 13))
-
     cols_alvo = obter_colunas_municipio(sistema, sih_grupo)
     dt_alvos = ["DTOBITO", "DTNASC", "DT_NOTIFIC"]
-    
     falhas = []
     sucessos_download = 0
 
     for uf in ufs_lista:
         resultados = []
-        if "SIH" in sistema or "CNES" in sistema:
+        df_temp = pd.DataFrame()
+        
+        # Extração
+        if "SIH" in sistema:
+            df_temp = buscar_sih_corrigido(uf, ano, meses_para_baixar, sih_grupo)
+            if not df_temp.empty:
+                resultados.append(df_temp)
+                sucessos_download += 1
+            else:
+                falhas.append(f"SIH VAZIO | {uf} {ano}")
+                
+        elif "CNES" in sistema:
             for m in meses_para_baixar:
-                df_temp = pd.DataFrame()
-                if "SIH" in sistema:
-                    df_temp = buscar_sih_seguro(uf, ano, m, sih_grupo)
-                elif "CNES" in sistema:
-                    try:
-                        res = api_cnes(state=uf, year=ano, month=m, group=cnes_grupo)
-                        df_temp = processar_retorno_pysus(res)
-                    except Exception as e:
-                        falhas.append(f"CNES | {uf} {ano}/{m:02d}: {e}")
-
-                if not df_temp.empty:
-                    resultados.append(df_temp)
-                    sucessos_download += 1
-                else:
-                    falhas.append(f"{sistema} VAZIO | {uf} {ano}/{m:02d}")
+                try:
+                    res = api_cnes(state=uf, year=ano, month=m, group=cnes_grupo)
+                    df_m = processar_retorno_pysus(res)
+                    if not df_m.empty:
+                        resultados.append(df_m)
+                        sucessos_download += 1
+                except Exception as e:
+                    falhas.append(f"CNES | {uf} {ano}/{m:02d}: {e}")
                     
         else:
-            df_temp = pd.DataFrame()
             try:
                 if "SIM" in sistema: 
                     res = api_sim(state=uf, year=ano)
@@ -363,13 +341,13 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                 falhas.append(f"Download Error {sistema} | {uf} {ano}: {e}")
 
             if not df_temp.empty:
-                print(f"[OK] Download {sistema} | UF={uf} | Ano={ano} | Linhas: {len(df_temp)}")
+                print(f"[OK] Download {sistema} | UF={uf} | Ano={ano} | Linhas extraídas: {len(df_temp)}")
                 resultados.append(df_temp)
                 sucessos_download += 1
             else:
                 falhas.append(f"{sistema} VAZIO | {uf} {ano}")
         
-        # 🌟 FILTROS BLINDADOS (Adeus SettingWithCopyWarning)
+        # Filtros de Dados Blindados
         for df_t in resultados:
             try:
                 df_t = df_t.copy()
@@ -385,12 +363,12 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                 if nivel_terr == "Município" and col_filtro_real:
                     df_t.loc[:, col_filtro_real] = df_t[col_filtro_real].apply(normalizar_codigo)
                     df_t = df_t[df_t[col_filtro_real].str.startswith(id_datasus_alvo)].copy()
-                    print(f"[FILTRO TERRITÓRIO] {sistema} | UF={uf} | Mun={id_datasus_alvo} | Linhas após filtro: {len(df_t)}")
+                    print(f"[FILTRO TERRITÓRIO] Mun={id_datasus_alvo} | Restantes: {len(df_t)}")
                 
                 if mes_num is not None and dt_col_real:
                     meses_extraidos = extrair_mes_datasus(df_t[dt_col_real])
                     df_t = df_t[meses_extraidos == mes_num].copy()
-                    print(f"[FILTRO MÊS] {sistema} | UF={uf} | Mês={mes_num} | Linhas após filtro: {len(df_t)}")
+                    print(f"[FILTRO MÊS] Mês={mes_num} | Restantes: {len(df_t)}")
                 
                 if not df_t.empty: 
                     partes_final.append(df_t)
@@ -405,9 +383,9 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
     if not partes_final:
         if sucessos_download == 0 and len(falhas) > 0:
             print(f"[ERRO GERAL] Detalhes das falhas: {falhas}")
-            return pd.DataFrame({"Erro": [f"🛑 FALHA DE CONEXÃO. O DATASUS não retornou dados. Verifique os logs no terminal."]})
+            return pd.DataFrame({"Erro": [f"🛑 FALHA DE CONEXÃO. O DATASUS não retornou dados. Detalhes nos logs do terminal."]})
         else:
-            return pd.DataFrame({"Erro": ["⚠️ FALTA DE DADOS: A extração foi realizada, mas a tabela ficou vazia após a filtragem."]})
+            return pd.DataFrame({"Erro": ["⚠️ FALTA DE DADOS: A extração foi realizada, mas a tabela ficou vazia após a filtragem territorial/mensal."]})
     
     df_final = pd.concat(partes_final, ignore_index=True)
     return df_final
@@ -415,6 +393,35 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
 # --- INTERFACE PRINCIPAL ---
 
 st.sidebar.title("🧬 Navegação e Filtros")
+
+# 🌟 BOTÕES DE DEBUG EXCLUSIVOS DO SIH (Apenas no log do terminal/interface temporária)
+st.sidebar.markdown("---")
+st.sidebar.markdown("**🛠️ Depuração SIH**")
+if st.sidebar.button("🧪 Listar arquivos SIH"):
+    try:
+        if list_files:
+            arquivos = list_files("SIH", group="RD", state="MG", year=2024, month=1)
+            st.sidebar.write(f"Arquivos encontrados: {len(arquivos)}")
+            st.sidebar.dataframe(arquivos, width="stretch")
+        else:
+            st.sidebar.error("Função list_files não importada.")
+    except Exception as e:
+        st.sidebar.error(f"Erro ao listar: {repr(e)}")
+
+if st.sidebar.button("🧪 Teste SIH mínimo"):
+    try:
+        st.sidebar.write("Testando: MG, 2024, Janeiro, RD")
+        df_teste = api_sih(state="MG", year=2024, month=1, group="RD", as_dataframe=True, show_progress=False)
+        st.sidebar.write(f"Tipo do Retorno: {type(df_teste)}")
+        st.sidebar.write(f"Tamanho: {len(df_teste) if hasattr(df_teste, '__len__') else 0}")
+        if isinstance(df_teste, pd.DataFrame) and not df_teste.empty:
+            st.sidebar.dataframe(df_teste.head(5), width="stretch")
+        else:
+            st.sidebar.warning("Retornou vazio.")
+    except Exception as e:
+        st.sidebar.error(f"Erro no Teste: {repr(e)}")
+st.sidebar.markdown("---")
+
 aba_ativa = st.sidebar.radio("Navegar para:", ["📋 Guia Principal (Extração)", "📚 Dicionários e Citações"])
 
 if aba_ativa == "📋 Guia Principal (Extração)":
@@ -480,121 +487,127 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                     tab1, tab2, tab3 = st.tabs(["✅ Planilha Tratada", "⚙️ Planilha Bruta", "📈 Painel de Análises (Dashboards)"])
                     
                     with tab1:
-                        st.dataframe(df_tratado.head(100))
+                        # 🌟 PROTEÇÃO DE MEMÓRIA DE EXIBIÇÃO: Evita travar a UI com bases grandes (MAX 1000 linhas na prévia)
+                        st.dataframe(df_tratado.head(1000), width="stretch")
                         st.download_button("📥 Baixar Tabela TRATADA (CSV)", df_tratado.to_csv(index=False, sep=';', decimal=','), f"tratado_{sistema_titulo}_{nome_local}.csv", "text/csv")
                     with tab2:
-                        st.dataframe(df_bruto.head(100))
+                        st.dataframe(df_bruto.head(1000), width="stretch")
                         st.download_button("📥 Baixar Tabela BRUTA (CSV)", df_bruto.to_csv(index=False, sep=';', decimal=','), f"bruto_{sistema_titulo}_{nome_local}.csv", "text/csv")
                         
                     with tab3:
                         st.subheader(f"📊 Painel Analítico: {sistema_titulo}")
-                        if "SIH" in sistema:
-                            c1, c2, c3 = st.columns(3)
-                            for c_val in ["Valor Total AIH (R$)", "Valor UTI (R$)"]:
-                                if c_val in df_tratado.columns:
-                                    df_tratado.loc[:, f"Num_{c_val}"] = pd.to_numeric(df_tratado[c_val].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
-                            
-                            soma_tot = df_tratado["Num_Valor Total AIH (R$)"].sum() if "Num_Valor Total AIH (R$)" in df_tratado.columns else 0
-                            soma_uti = df_tratado["Num_Valor UTI (R$)"].sum() if "Num_Valor UTI (R$)" in df_tratado.columns else 0
-                            
-                            c1.metric("💰 Custo Total Pago (AIH)", f"R$ {soma_tot:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-                            c2.metric("🏥 Custo em UTI", f"R$ {soma_uti:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-                            
-                            c_sexo, c_morte = st.columns(2)
-                            with c_sexo:
-                                col_sexo = next((c for c in df_tratado.columns if "Sexo Paciente" in c), None)
-                                if col_sexo:
-                                    st.write(f"**Distribuição por Sexo**")
-                                    st.bar_chart(df_tratado[col_sexo].value_counts())
-                            with c_morte:
-                                if "Desfecho (Alta/Óbito)" in df_tratado.columns:
-                                    st.write("**Desfecho da Internação**")
-                                    st.bar_chart(df_tratado["Desfecho (Alta/Óbito)"].value_counts())
-                            
-                            c_a, c_b = st.columns(2)
-                            if "Procedimento Realizado (SIGTAP)" in df_tratado.columns:
-                                with c_a:
-                                    st.write("**Top 10 Procedimentos Realizados**")
-                                    st.bar_chart(df_tratado["Procedimento Realizado (SIGTAP)"].value_counts().head(10))
-                            if "Diagnóstico Principal (CID-10)" in df_tratado.columns:
-                                with c_b:
-                                    st.write("**Top 10 Causas de Internação (CID-10)**")
-                                    st.bar_chart(df_tratado["Diagnóstico Principal (CID-10)"].value_counts().head(10))
-                                
-                        elif "SINASC" in sistema:
-                            st.write("### Perfil da Mãe")
-                            c1, c2 = st.columns(2)
-                            with c1:
-                                if "Faixa Etária da Mãe" in df_tratado.columns:
-                                    st.write("**Idade das Mães no Parto**")
-                                    st.bar_chart(df_tratado["Faixa Etária da Mãe"].value_counts().sort_index())
-                            with c2:
-                                if "Escolaridade Mãe (2010)" in df_tratado.columns:
-                                    st.write(f"**Escolaridade Mãe (2010)**")
-                                    st.bar_chart(df_tratado["Escolaridade Mãe (2010)"].value_counts())
-                                    
-                            if "Ocupação/Profissão Mãe (CBO)" in df_tratado.columns:
-                                st.write("**Top 10 Ocupações das Mães**")
-                                st.bar_chart(df_tratado["Ocupação/Profissão Mãe (CBO)"].value_counts().head(10))
-                                
-                            st.write("---")
-                            st.write("### Perfil do Nascido Vivo")
-                            c3, c4, c5 = st.columns(3)
-                            with c3:
-                                col_sexo = next((c for c in df_tratado.columns if "Sexo Bebê" in c), None)
-                                if col_sexo:
-                                    st.write("**Sexo do Bebê**")
-                                    st.bar_chart(df_tratado[col_sexo].value_counts())
-                            with c4:
-                                col_cor_bebe = next((c for c in df_tratado.columns if "Raça/Cor Bebê" in c), None)
-                                if col_cor_bebe:
-                                    st.write("**Raça/Cor do Bebê**")
-                                    st.bar_chart(df_tratado[col_cor_bebe].value_counts())
-                            with c5:
-                                col_cor_mae = next((c for c in df_tratado.columns if "Raça/Cor da Mãe" in c), None)
-                                if col_cor_mae:
-                                    st.write("**Raça/Cor da Mãe**")
-                                    st.bar_chart(df_tratado[col_cor_mae].value_counts())
-                                
-                        elif "CNES" in sistema:
-                            st.write("📈 *O Painel Gráfico prioriza bases clínicas e epidemiológicas. Explore a lista bruta de recursos do CNES na aba de Planilha.*")
-                            
-                        elif "SIM" in sistema:
-                            c1, c2 = st.columns(2)
-                            col_sexo = next((c for c in df_tratado.columns if "Sexo" in c), None)
-                            if col_sexo:
-                                with c1:
-                                    st.write(f"**Distribuição por {col_sexo}**")
-                                    st.bar_chart(df_tratado[col_sexo].value_counts())
-                            col_raca = next((c for c in df_tratado.columns if "Raça" in c), None)
-                            if col_raca:
-                                with c2:
-                                    st.write(f"**Distribuição por {col_raca}**")
-                                    st.bar_chart(df_tratado[col_raca].value_counts())
-                            
-                            c3, c4 = st.columns(2)
-                            with c3:
-                                col_circ = next((c for c in df_tratado.columns if "Circunstância do Óbito" in c), None)
-                                if col_circ:
-                                    st.write(f"**Circunstância do Óbito**")
-                                    st.bar_chart(df_tratado[col_circ].value_counts())
-                            with c4:
-                                col_doenca = next((c for c in df_tratado.columns if "Causa Básica (CID-10)" in c), None)
-                                if col_doenca:
-                                    st.write(f"**Top 10 Causas de Mortalidade ({col_doenca})**")
-                                    st.bar_chart(df_tratado[col_doenca].value_counts().head(10))
+                        
+                        # 🌟 PROTEÇÃO DE MEMÓRIA (SINAN)
+                        if "SINAN" in sistema and len(df_bruto) > 50000:
+                            st.warning("⚠️ Base SINAN muito grande (> 50k registros). Gráficos automáticos desativados para evitar queda do app. Baixe a planilha ou filtre um município específico.")
                         else:
-                            c1, c2 = st.columns(2)
-                            col_sexo = next((c for c in df_tratado.columns if "Sexo" in c), None)
-                            if col_sexo:
+                            if "SIH" in sistema:
+                                c1, c2, c3 = st.columns(3)
+                                for c_val in ["Valor Total AIH (R$)", "Valor UTI (R$)"]:
+                                    if c_val in df_tratado.columns:
+                                        df_tratado.loc[:, f"Num_{c_val}"] = pd.to_numeric(df_tratado[c_val].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
+                                
+                                soma_tot = df_tratado["Num_Valor Total AIH (R$)"].sum() if "Num_Valor Total AIH (R$)" in df_tratado.columns else 0
+                                soma_uti = df_tratado["Num_Valor UTI (R$)"].sum() if "Num_Valor UTI (R$)" in df_tratado.columns else 0
+                                
+                                c1.metric("💰 Custo Total Pago (AIH)", f"R$ {soma_tot:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                                c2.metric("🏥 Custo em UTI", f"R$ {soma_uti:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                                
+                                c_sexo, c_morte = st.columns(2)
+                                with c_sexo:
+                                    col_sexo = next((c for c in df_tratado.columns if "Sexo Paciente" in c), None)
+                                    if col_sexo:
+                                        st.write(f"**Distribuição por Sexo**")
+                                        st.bar_chart(df_tratado[col_sexo].value_counts())
+                                with c_morte:
+                                    if "Desfecho (Alta/Óbito)" in df_tratado.columns:
+                                        st.write("**Desfecho da Internação**")
+                                        st.bar_chart(df_tratado["Desfecho (Alta/Óbito)"].value_counts())
+                                
+                                c_a, c_b = st.columns(2)
+                                if "Procedimento Realizado (SIGTAP)" in df_tratado.columns:
+                                    with c_a:
+                                        st.write("**Top 10 Procedimentos Realizados**")
+                                        st.bar_chart(df_tratado["Procedimento Realizado (SIGTAP)"].value_counts().head(10))
+                                if "Diagnóstico Principal (CID-10)" in df_tratado.columns:
+                                    with c_b:
+                                        st.write("**Top 10 Causas de Internação (CID-10)**")
+                                        st.bar_chart(df_tratado["Diagnóstico Principal (CID-10)"].value_counts().head(10))
+                                    
+                            elif "SINASC" in sistema:
+                                st.write("### Perfil da Mãe")
+                                c1, c2 = st.columns(2)
                                 with c1:
-                                    st.write(f"**Distribuição por {col_sexo}**")
-                                    st.bar_chart(df_tratado[col_sexo].value_counts())
-                            col_raca = next((c for c in df_tratado.columns if "Raça" in c), None)
-                            if col_raca:
+                                    if "Faixa Etária da Mãe" in df_tratado.columns:
+                                        st.write("**Idade das Mães no Parto**")
+                                        st.bar_chart(df_tratado["Faixa Etária da Mãe"].value_counts().sort_index())
                                 with c2:
-                                    st.write(f"**Distribuição por {col_raca}**")
-                                    st.bar_chart(df_tratado[col_raca].value_counts())
+                                    if "Escolaridade Mãe (2010)" in df_tratado.columns:
+                                        st.write(f"**Escolaridade Mãe (2010)**")
+                                        st.bar_chart(df_tratado["Escolaridade Mãe (2010)"].value_counts())
+                                        
+                                if "Ocupação/Profissão Mãe (CBO)" in df_tratado.columns:
+                                    st.write("**Top 10 Ocupações das Mães**")
+                                    st.bar_chart(df_tratado["Ocupação/Profissão Mãe (CBO)"].value_counts().head(10))
+                                    
+                                st.write("---")
+                                st.write("### Perfil do Nascido Vivo")
+                                c3, c4, c5 = st.columns(3)
+                                with c3:
+                                    col_sexo = next((c for c in df_tratado.columns if "Sexo Bebê" in c), None)
+                                    if col_sexo:
+                                        st.write("**Sexo do Bebê**")
+                                        st.bar_chart(df_tratado[col_sexo].value_counts())
+                                with c4:
+                                    col_cor_bebe = next((c for c in df_tratado.columns if "Raça/Cor Bebê" in c), None)
+                                    if col_cor_bebe:
+                                        st.write("**Raça/Cor do Bebê**")
+                                        st.bar_chart(df_tratado[col_cor_bebe].value_counts())
+                                with c5:
+                                    col_cor_mae = next((c for c in df_tratado.columns if "Raça/Cor da Mãe" in c), None)
+                                    if col_cor_mae:
+                                        st.write("**Raça/Cor da Mãe**")
+                                        st.bar_chart(df_tratado[col_cor_mae].value_counts())
+                                    
+                            elif "CNES" in sistema:
+                                st.write("📈 *O Painel Gráfico prioriza bases clínicas e epidemiológicas. Explore a lista bruta de recursos do CNES na aba de Planilha.*")
+                                
+                            elif "SIM" in sistema:
+                                c1, c2 = st.columns(2)
+                                col_sexo = next((c for c in df_tratado.columns if "Sexo" in c), None)
+                                if col_sexo:
+                                    with c1:
+                                        st.write(f"**Distribuição por {col_sexo}**")
+                                        st.bar_chart(df_tratado[col_sexo].value_counts())
+                                col_raca = next((c for c in df_tratado.columns if "Raça" in c), None)
+                                if col_raca:
+                                    with c2:
+                                        st.write(f"**Distribuição por {col_raca}**")
+                                        st.bar_chart(df_tratado[col_raca].value_counts())
+                                
+                                c3, c4 = st.columns(2)
+                                with c3:
+                                    col_circ = next((c for c in df_tratado.columns if "Circunstância do Óbito" in c), None)
+                                    if col_circ:
+                                        st.write(f"**Circunstância do Óbito**")
+                                        st.bar_chart(df_tratado[col_circ].value_counts())
+                                with c4:
+                                    col_doenca = next((c for c in df_tratado.columns if "Causa Básica (CID-10)" in c), None)
+                                    if col_doenca:
+                                        st.write(f"**Top 10 Causas de Mortalidade ({col_doenca})**")
+                                        st.bar_chart(df_tratado[col_doenca].value_counts().head(10))
+                            else:
+                                c1, c2 = st.columns(2)
+                                col_sexo = next((c for c in df_tratado.columns if "Sexo" in c), None)
+                                if col_sexo:
+                                    with c1:
+                                        st.write(f"**Distribuição por {col_sexo}**")
+                                        st.bar_chart(df_tratado[col_sexo].value_counts())
+                                col_raca = next((c for c in df_tratado.columns if "Raça" in c), None)
+                                if col_raca:
+                                    with c2:
+                                        st.write(f"**Distribuição por {col_raca}**")
+                                        st.bar_chart(df_tratado[col_raca].value_counts())
                 else:
                     msg = df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados disponíveis."
                     st.error(msg)
