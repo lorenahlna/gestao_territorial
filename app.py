@@ -1,4 +1,4 @@
-# VERSAO_VALIDADA_V6_PREFIXO_TEMPORAL_ESTRITO_PRESENTE
+# VERSAO_VALIDADA_V7_PREFIXO_TEMPORAL_ESTRITO_COMPLETO
 import streamlit as st
 import pandas as pd
 import requests
@@ -154,7 +154,8 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
         df_t = df_t.copy()
         df_t.columns = [str(c).upper().strip() for c in df_t.columns]
         
-        col_filtro_real = next((c Browser for c in df_t.columns if c in [x.upper() for x in cols_alvo]), None)
+        # 🌟 CORREÇÃO REALIZADA: "Browser" removido com sucesso!
+        col_filtro_real = next((c for c in df_t.columns if c in [x.upper() for x in cols_alvo]), None)
         dt_col_real = next((c for c in df_t.columns if c in dt_alvos), None)
         
         if nivel_terr == "Município" and not col_filtro_real:
@@ -218,7 +219,7 @@ def normalizar_lista_arquivos_pysus(res):
 
 def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     if isinstance(arquivos, pd.DataFrame):
-        return arquivos
+        return archivos
     ano2 = str(ano)[-2:]
     mes2 = f"{int(mes):02d}"
     prefixo_exato = f"{grupo}{uf}{ano2}{mes2}".upper()
@@ -346,7 +347,7 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                         res = baixar_sih_seguro_pysus23(uf, ano, m, sih_grupo)
                         if isinstance(res, pd.DataFrame) and "Erro" in res.columns:
                             return res
-                        df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
+                        df_temp, archivos_lidos = processar_retorno_pysus_duckdb(
                             res, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado,
                             prefixo_esperado=f"{sih_grupo}{uf}{str(ano)[-2:]}{int(m):02d}"
                         )
@@ -446,8 +447,8 @@ def tratar_e_traduzir_df(df, sistema):
         df_tratado.loc[:, "GRUPO_IDADE_MAE"] = df_tratado["IDADEMAE"].apply(agrupar_idade_mae)
     if "NU_IDADE_N" in df_tratado.columns: df_tratado.loc[:, "NU_IDADE_N"] = df_tratado["NU_IDADE_N"].apply(decodificar_idade_datasus)
 
-    for c_cbo in ["OCUP", "OCUPMAE", "CODOCUPMAE", "ID_OCUPA_N"]:
-        if c_cbo in df_tratado.columns: df_tratado.loc[:, c_cbo] = df_tratado[c_cbo].apply(decodificar_cbo)
+    for c_vbo in ["OCUP", "OCUPMAE", "CODOCUPMAE", "ID_OCUPA_N"]:
+        if c_vbo in df_tratado.columns: df_tratado.loc[:, c_vbo] = df_tratado[c_vbo].apply(decodificar_cbo)
 
     dict_cid = TABELAS_EXTERNAS.get("CID10", {})
     for col in ["CAUSABAS", "DIAG_PRINC", "DIAG_SECUN", "ID_AGRAVO"]:
@@ -570,7 +571,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             df_tratado = tratar_e_traduzir_df(df_bruto, sistema)
                             sistema_titulo = f"SINAN ({nome_agravo})" if "SINAN" in sistema else f"SIH ({sih_grupo_sel})" if "SIH" in sistema else f"CNES ({cnes_grupo_sel})" if "CNES" in sistema else sistema.split(" (")[0]
                         
-                        # 🌟 CORREÇÃO DE SINTAXE DEPLOY COMPLETO EFETUADO COM SUCESSO
                         periodo_label = f"{mes_sel:02d}/{ano_sel}" if mes_sel else f"{ano_sel}"
                         st.markdown(
                             f'<div class="metric-card"><h2>{len(df_bruto)} Registros Processados</h2><p>{sistema_titulo} - {nome_local} ({periodo_label})</p></div>',
@@ -770,7 +770,7 @@ elif aba_ativa == "📚 Dicionários e Citações":
 
     with st.expander("⏳ Atraso de Digitação e Consolidação (Lag)"):
         st.markdown("""
-        Los dados de saúde pública no Brasil sofrem um atraso natural entre a ocorrência e a disponibilidade no sistema:
+        Os dados de saúde pública no Brasil sofrem um atraso natural entre a ocorrência e a disponibilidade no sistema:
         * **SIH (Internações):** É o sistema mais ágil (focado em faturamento). Atraso médio de **2 a 3 meses**.
         * **SINAN (Agravos):** Varia por doença. Epidemias são rápidas, mas agravos crônicos podem levar até **6 meses** para chegar ao servidor federal.
         * **SIM e SINASC (Óbitos e Nascimentos):** São os mais lentos devido à burocracia de cartórios e validações. Dados do ano corrente são sempre \"Preliminares\". A base consolidada pode levar até **2 anos** para ser fechada.
