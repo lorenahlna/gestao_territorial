@@ -4,8 +4,9 @@ import requests
 import io
 import urllib3
 import gc
-from datetime import datetime
 import os
+import ftplib
+from datetime import datetime
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -54,7 +55,7 @@ def carregar_dicionarios_github():
         res.raise_for_status()
         return res.json()
     except Exception as e:
-        st.warning(f"⚠️ Aviso: Usando dicionários de contingência (Falha ao ler JSON).")
+        st.warning(f"⚠️ Aviso: Usando dicionários de contingência (Falha ao ler JSON: {e}).")
         return {
             "CBO_ESPECIFICOS": {"2251": "Médicos clínicos", "2235": "Enfermeiros"},
             "CBO_SUBGRUPOS": {"01": "Forças Armadas", "11": "Dirigentes", "22": "Profissionais de Saúde"},
@@ -78,7 +79,8 @@ def carregar_tabelas_complementares():
                 tabelas["CID10"] = dict(zip(df_cid["codigo_datasus"], df_cid["descricao"]))
             else:
                 tabelas["CID10"] = dict(zip(df_cid.iloc[:, 0].str.strip().str.upper(), df_cid.iloc[:, 1].str.strip()))
-        except: pass
+        except Exception as e:
+            st.sidebar.warning(f"Erro ao ler CID local: {e}")
             
     BASE_RAW_URL = "https://raw.githubusercontent.com/cartaproale/PySUS/main/"
     try:
@@ -114,7 +116,7 @@ def buscar_municipios_por_uf(uf_sigla):
     except:
         return {"Belo Horizonte": {"id7": "3106200", "id6": "310620", "nome": "Belo Horizonte", "uf": "MG"}}
 
-# --- TRATADORES DE DADOS ---
+# --- TRATADORES DE DADOS E FILTROS IMEDIATOS ---
 def normalizar_codigo(valor):
     if pd.isna(valor): return ""
     return str(valor).strip().replace(".0", "")
@@ -143,6 +145,41 @@ def obter_colunas_municipio(sistema, grupo=None):
     if "SINAN" in sistema: return ["ID_MN_RESI", "ID_MUNICIP"]
     if "CNES" in sistema: return ["CODUFMUN"]
     return []
+
+# 🌟 NOVIDADE: A função que filtra TUDO imediatamente após o download para salvar a RAM
+def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo, dt_alvos):
+    try:
+        df_t = df_t.copy()
+        df_t.columns = [str(c).upper().strip() for c in df_t.columns]
+        
+        col_filtro_real = next((c for c in df_t.columns if c in [x.upper() for x in cols_alvo]), None)
+        dt_col_real = next((c for c in df_t.columns if c in dt_alvos), None)
+        
+        # Filtro de Estado (SINAN)
+        if "SINAN" in sistema and nivel_terr in ["Estado", "Município"] and col_filtro_real:
+            codigo_uf_ibge = ESTADOS_IBGE.get(uf, "")
+            df_t.loc[:, col_filtro_real] = df_t[col_filtro_real].apply(normalizar_codigo)
+            df_t = df_t[df_t[col_filtro_real].str.startswith(codigo_uf_ibge)].copy()
+        
+        # Filtro Rigoroso de Município (O GRANDE SALVADOR DE MEMÓRIA)
+        if nivel_terr == "Município" and col_filtro_real:
+            df_t.loc[:, col_filtro_real] = df_t[col_filtro_real].apply(normalizar_codigo)
+            df_t = df_t[df_t[col_filtro_real].str.startswith(id_datasus_alvo)].copy()
+        
+        # Filtro Mensal Rigoroso
+        if mes_num is not None and dt_col_real:
+            meses_extraidos = extrair_mes_datasus(df_t[dt_col_real])
+            df_t = df_t[meses_extraidos == mes_num].copy()
+        
+        # Trava de Segurança para o SINAN (Evita o Connection Reset By Peer)
+        if "SINAN" in sistema and not df_t.empty and len(df_t) > 50000:
+            print(f"[SINAN ALERTA] Base gigante reduzida de {len(df_t)} para 50000 linhas.")
+            df_t = df_t.head(50000).copy()
+            
+        return df_t
+    except Exception as e:
+        print(f"[ERRO FILTRO IMEDIATO] Falha ao processar {uf}: {e}")
+        return pd.DataFrame()
 
 def decodificar_idade_datasus(valor):
     v_str = normalizar_codigo(valor)
@@ -242,7 +279,36 @@ def tratar_e_traduzir_df(df, sistema):
     df_tratado = df_tratado.rename(columns=cabecalhos.get(sigla_sistema, {}))
     return df_tratado
 
-# --- MOTOR DATASUS COM GESTÃO DE MEMÓRIA ---
+# --- MOTOR DATASUS (DEBUG, FALLBACK FTP E EARLY FILTERING) ---
+
+def fallback_ftp_sih(uf, ano, mes, grupo):
+    yy = str(ano)[-2:]
+    mm = str(mes).zfill(2)
+    filename = f"{grupo.upper()}{uf.upper()}{yy}{mm}.dbc"
+    ftp_path = "/dissemin/publicos/SIHSUS/200801_/Dados/"
+    local_file = f"{filename}"
+    
+    print(f"[FALLBACK FTP] Iniciando conexão raiz para {filename}...")
+    try:
+        ftp = ftplib.FTP("ftp.datasus.gov.br", timeout=30)
+        ftp.login()
+        ftp.cwd(ftp_path)
+        with open(local_file, "wb") as f:
+            ftp.retrbinary(f"RETR {filename}", f.write)
+        ftp.quit()
+        
+        from pysus.utilities.readdbc import read_dbc
+        df = read_dbc(local_file, encoding='iso-8859-1')
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            print(f"[FALLBACK FTP] Sucesso absoluto! Linhas: {len(df)}")
+            try: os.remove(local_file)
+            except: pass
+            return df
+    except Exception as e:
+        print(f"[FALLBACK FTP] Falha crítica no FTP: {e}")
+        try: os.remove(local_file)
+        except: pass
+    return pd.DataFrame()
 
 def processar_retorno_pysus(res):
     try:
@@ -265,26 +331,12 @@ def processar_retorno_pysus(res):
                     except: pass
             if frames: return pd.concat(frames, ignore_index=True)
     except Exception as e:
-        print(f"Erro processando arquivo: {e}")
+        print(f"Erro processando arquivo genérico: {e}")
     return pd.DataFrame()
 
 def buscar_sih_seguro(uf, ano, mes, grupo):
-    """
-    🌟 CORREÇÃO DO SIH: Usa HTTP/Parquet nativo do PySUS online_data 
-    para burlar o bloqueio de FTP (Porta 21) da Nuvem do Streamlit.
-    """
-    print(f"[SIH] Tentando via online_data (HTTP Parquet) | {uf} {ano}/{mes} {grupo}")
-    try:
-        from pysus.online_data.SIH import download
-        res = download(states=[uf], years=[ano], months=[mes], groups=[grupo])
-        df = processar_retorno_pysus(res)
-        if not df.empty:
-            print(f"[SIH ONLINE DATA] Sucesso! Linhas: {len(df)}")
-            return df
-    except Exception as e:
-        print(f"[SIH ERRO online_data]: {e}")
-
-    # Fallback clássico caso o online_data falhe
+    print(f"[SIH TESTE] Iniciando | UF={uf} | Ano={ano} | Mes={mes:02d} | Grupo={grupo}")
+    df_result = pd.DataFrame()
     combinacoes = [
         {"state": uf, "year": ano, "month": mes, "groups": [grupo]},
         {"state": uf, "year": ano, "month": mes, "group": grupo}
@@ -292,19 +344,24 @@ def buscar_sih_seguro(uf, ano, mes, grupo):
     for kwargs in combinacoes:
         try:
             res = api_sih(**kwargs)
-            df = processar_retorno_pysus(res)
-            if not df.empty: return df
-        except: continue
-        
-    return pd.DataFrame()
+            df_temp = processar_retorno_pysus(res)
+            if not df_temp.empty:
+                print(f"[SIH TESTE] Sucesso via API. Linhas: {len(df_temp)}")
+                df_result = df_temp
+                break
+        except Exception: continue
 
+    if df_result.empty:
+        print("[SIH ALERTA] Catálogo do PySUS falhou. Acionando Fallback FTP...")
+        df_result = fallback_ftp_sih(uf, ano, mes, grupo)
+        
+    return df_result
 
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo=""):
     if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     
-    partes_final = [] # O SEGREDO DA MEMÓRIA: Evita concatenação progressiva gigante
+    partes_final = [] 
     meses_para_baixar = [mes_num] if mes_num else list(range(1, 13))
-
     cols_alvo = obter_colunas_municipio(sistema, sih_grupo)
     dt_alvos = ["DTOBITO", "DTNASC", "DT_NOTIFIC"]
     
@@ -312,7 +369,6 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
     sucessos_download = 0
 
     for uf in ufs_lista:
-        resultados = []
         if "SIH" in sistema or "CNES" in sistema:
             for m in meses_para_baixar:
                 df_temp = pd.DataFrame()
@@ -320,21 +376,28 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                     if "SIH" in sistema:
                         df_temp = buscar_sih_seguro(uf, ano, m, sih_grupo)
                     elif "CNES" in sistema:
-                        try: res = api_cnes(state=uf, year=ano, month=m, group=cnes_grupo)
-                        except TypeError: res = api_cnes(state=uf, year=ano, month=m, groups=[cnes_grupo])
+                        try: res = api_cnes(state=uf, year=ano, month=m, groups=[cnes_grupo])
+                        except TypeError: res = api_cnes(state=uf, year=ano, month=m, group=cnes_grupo)
                         df_temp = processar_retorno_pysus(res)
                 except Exception as e:
-                    falhas.append(f"Download Error {sistema} | {uf} {ano}/{m:02d}: {e}")
+                    falhas.append(f"Erro {sistema} | {uf} {ano}/{m:02d}: {e}")
                     continue
 
+                # 🌟 FILTRO IMEDIATO APLICADO AQUI (DENTRO DO LOOP MENSAL)
                 if not df_temp.empty:
-                    print(f"[OK] Download {sistema} | UF={uf} | Ano={ano}/{m:02d} | Linhas: {len(df_temp)}")
-                    resultados.append(df_temp)
-                    sucessos_download += 1
+                    linhas_antes = len(df_temp)
+                    df_temp = aplicar_filtros_imediato(df_temp, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo, dt_alvos)
+                    if not df_temp.empty:
+                        print(f"[FILTRO PRECOCE] {sistema} | {uf} {ano}/{m:02d} | Linhas {linhas_antes} -> {len(df_temp)}")
+                        partes_final.append(df_temp)
+                        sucessos_download += 1
+                    else:
+                        falhas.append(f"{sistema} VAZIO PÓS-FILTRO | {uf} {ano}/{m:02d}")
                 else:
-                    falhas.append(f"{sistema} VAZIO | {uf} {ano}/{m:02d}")
+                    falhas.append(f"{sistema} VAZIO NO DOWNLOAD | {uf} {ano}/{m:02d}")
                     
         else:
+            # BLOCO SIM / SINASC / SINAN (Baseada em Ano inteiro, não por mês)
             df_temp = pd.DataFrame()
             try:
                 if "SIM" in sistema: 
@@ -351,55 +414,27 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                 falhas.append(f"Download Error {sistema} | {uf} {ano}: {e}")
                 continue
 
+            # 🌟 FILTRO IMEDIATO APLICADO AQUI TAMBÉM
             if not df_temp.empty:
-                print(f"[OK] Download {sistema} | UF={uf} | Ano={ano} | Linhas: {len(df_temp)}")
-                resultados.append(df_temp)
-                sucessos_download += 1
+                linhas_antes = len(df_temp)
+                df_temp = aplicar_filtros_imediato(df_temp, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo, dt_alvos)
+                if not df_temp.empty:
+                    print(f"[FILTRO PRECOCE] {sistema} | {uf} {ano} | Linhas {linhas_antes} -> {len(df_temp)}")
+                    partes_final.append(df_temp)
+                    sucessos_download += 1
+                else:
+                    falhas.append(f"{sistema} VAZIO PÓS-FILTRO | {uf} {ano}")
             else:
-                falhas.append(f"{sistema} VAZIO | {uf} {ano}")
+                falhas.append(f"{sistema} VAZIO NO DOWNLOAD | {uf} {ano}")
         
-        # Filtros Cegos Blindados com .copy() e .loc para proteger a Memória (SettingWithCopyWarning)
-        for df_t in resultados:
-            try:
-                df_t = df_t.copy()
-                df_t.columns = [str(c).upper().strip() for c in df_t.columns]
-                col_filtro_real = next((c for c in df_t.columns if c in [x.upper() for x in cols_alvo]), None)
-                dt_col_real = next((c for c in df_t.columns if c in dt_alvos), None)
-                
-                if "SINAN" in sistema and nivel_terr in ["Estado", "Município"] and col_filtro_real:
-                    codigo_uf_ibge = ESTADOS_IBGE.get(uf, "")
-                    df_t.loc[:, col_filtro_real] = df_t[col_filtro_real].apply(normalizar_codigo)
-                    df_t = df_t[df_t[col_filtro_real].str.startswith(codigo_uf_ibge)].copy()
-                
-                if nivel_terr == "Município" and col_filtro_real:
-                    df_t.loc[:, col_filtro_real] = df_t[col_filtro_real].apply(normalizar_codigo)
-                    df_t = df_t[df_t[col_filtro_real].str.startswith(id_datasus_alvo)].copy()
-                
-                if mes_num is not None and dt_col_real:
-                    meses_extraidos = extrair_mes_datasus(df_t[dt_col_real])
-                    df_t = df_t[meses_extraidos == mes_num].copy()
-                
-                # 🌟 LIMITADOR DO SINAN: Reduz para as primeiras 50k linhas para evitar queda do App
-                if "SINAN" in sistema and not df_t.empty and len(df_t) > 50000:
-                    print(f"[SINAN ALERTA] Base enorme! Limitando para proteger o Streamlit...")
-                    df_t = df_t.head(50000)
-                
-                if not df_t.empty: 
-                    partes_final.append(df_t)
-                
-            except Exception as e:
-                falhas.append(f"Erro no Filtro | {uf}: {e}")
-                continue
-            
-        del resultados
-        gc.collect() # Limpa o lixo da RAM a cada UF processada
+        gc.collect() # Limpa a RAM a cada UF
             
     if not partes_final:
         if sucessos_download == 0 and len(falhas) > 0:
-            print(f"[ERRO GERAL] Detalhes: {falhas}")
-            return pd.DataFrame({"Erro": [f"🛑 FALHA DE CONEXÃO ou ARQUIVO INEXISTENTE. O DATASUS não retornou dados."]})
+            print(f"[ERRO GERAL] Detalhes das falhas: {falhas}")
+            return pd.DataFrame({"Erro": [f"🛑 FALHA DE CONEXÃO. O DATASUS não retornou dados."]})
         else:
-            return pd.DataFrame({"Erro": ["⚠️ FALTA DE DADOS: A extração foi realizada, mas a tabela ficou vazia após a filtragem."] })
+            return pd.DataFrame({"Erro": ["⚠️ FALTA DE DADOS: A extração foi realizada, mas a tabela ficou vazia após a filtragem."]})
     
     df_final = pd.concat(partes_final, ignore_index=True)
     return df_final
@@ -452,7 +487,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
         ano_sel = st.sidebar.selectbox("Ano de Referência:", listar_anos_disponiveis(sistema))
         
         if "SINASC" in sistema and ano_sel >= 2021:
-            st.sidebar.warning("⚠️ **Aviso de Migração:** Os microdados de Nascidos Vivos após 2020 foram movidos para o Portal de Dados Abertos. A conexão nativa pode falhar.")
+            st.sidebar.warning("⚠️ **Aviso de Migração:** Os microdados de Nascidos Vivos após 2020 foram movidos para o Portal de Dados Abertos. A conexão nativa (FTP) pode falhar.")
             
         nome_mes = st.sidebar.selectbox("Mês de Competência/Ocorrência (Opcional):", MESES_NOMES)
         mes_sel = None if nome_mes == "Todos os Meses" else int(nome_mes.split(" - ")[0])
@@ -484,7 +519,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                         st.download_button("📥 Baixar Tabela BRUTA (CSV)", df_bruto.to_csv(index=False, sep=';', decimal=','), f"bruto_{sistema_titulo}_{nome_local}.csv", "text/csv")
                         
                     with tab3:
-                        # 🌟 TRAVA DE PROTEÇÃO: Não gerar gráficos para SINAN enorme
                         if "SINAN" in sistema and len(df_tratado) >= 50000:
                             st.info("📊 Os gráficos estão indisponíveis para esta extração devido ao alto volume de dados.")
                         else:
