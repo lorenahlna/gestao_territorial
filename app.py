@@ -4,9 +4,8 @@ import requests
 import io
 import urllib3
 import gc
-import os
-import ftplib
 from datetime import datetime
+import os
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -55,7 +54,7 @@ def carregar_dicionarios_github():
         res.raise_for_status()
         return res.json()
     except Exception as e:
-        st.warning(f"⚠️ Aviso: Usando dicionários de contingência (Falha ao ler JSON: {e}).")
+        st.warning(f"⚠️ Aviso: Usando dicionários de contingência.")
         return {
             "CBO_ESPECIFICOS": {"2251": "Médicos clínicos", "2235": "Enfermeiros"},
             "CBO_SUBGRUPOS": {"01": "Forças Armadas", "11": "Dirigentes", "22": "Profissionais de Saúde"},
@@ -65,11 +64,10 @@ def carregar_dicionarios_github():
 
 CONFIG_APP = carregar_dicionarios_github()
 
-# --- 2. INTEGRAÇÃO DOS DICIONÁRIOS PESADOS (CSV LOCAL E GITHUB) ---
+# --- 2. INTEGRAÇÃO DOS DICIONÁRIOS PESADOS ---
 @st.cache_data(show_spinner=False)
 def carregar_tabelas_complementares():
     tabelas = {"CBO": {}, "CID10": {}, "SIGTAP": {}}
-    
     if os.path.exists("tabela_cid10_codigo_descricao.csv"):
         try:
             df_cid = pd.read_csv("tabela_cid10_codigo_descricao.csv", sep=";", dtype=str, encoding='utf-8', on_bad_lines='skip')
@@ -79,20 +77,17 @@ def carregar_tabelas_complementares():
                 tabelas["CID10"] = dict(zip(df_cid["codigo_datasus"], df_cid["descricao"]))
             else:
                 tabelas["CID10"] = dict(zip(df_cid.iloc[:, 0].str.strip().str.upper(), df_cid.iloc[:, 1].str.strip()))
-        except Exception as e:
-            st.sidebar.warning(f"Erro ao ler CID local: {e}")
+        except Exception as e: pass
             
     BASE_RAW_URL = "https://raw.githubusercontent.com/cartaproale/PySUS/main/"
     try:
         df_cbo = pd.read_csv(BASE_RAW_URL + "tabelas/cbo.csv", sep=";", dtype=str, encoding='utf-8')
         tabelas["CBO"] = dict(zip(df_cbo.iloc[:, 0], df_cbo.iloc[:, 1]))
     except: pass
-        
     try:
         df_sigtap = pd.read_csv(BASE_RAW_URL + "Referencias/tb_procedimento.csv", sep=";", dtype=str, encoding='utf-8')
         tabelas["SIGTAP"] = dict(zip(df_sigtap.iloc[:, 0], df_sigtap.iloc[:, 1]))
     except: pass
-        
     return tabelas
 
 TABELAS_EXTERNAS = carregar_tabelas_complementares()
@@ -103,7 +98,6 @@ try:
 except ImportError:
     api_sim = api_sih = api_cnes = api_sinasc = api_sinan = None
 
-# --- FUNÇÕES DE METADADOS E TERRITÓRIO ---
 UFS = ["AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS","MG","PA","PB","PR","PE","PI","RJ","RN","RS","RO","RR","SC","SP","SE","TO"]
 ESTADOS_IBGE = {"AC": "12", "AL": "27", "AP": "16", "AM": "13", "BA": "29", "CE": "23", "DF": "53", "ES": "32", "GO": "52", "MA": "21", "MT": "51", "MS": "50", "MG": "31", "PA": "15", "PB": "25", "PR": "41", "PE": "26", "PI": "22", "RJ": "33", "RN": "24", "RS": "43", "RO": "11", "RR": "14", "SC": "42", "SP": "35", "SE": "28", "TO": "17"}
 
@@ -116,7 +110,7 @@ def buscar_municipios_por_uf(uf_sigla):
     except:
         return {"Belo Horizonte": {"id7": "3106200", "id6": "310620", "nome": "Belo Horizonte", "uf": "MG"}}
 
-# --- TRATADORES DE DADOS E FILTROS IMEDIATOS ---
+# --- TRATADORES DE DADOS ---
 def normalizar_codigo(valor):
     if pd.isna(valor): return ""
     return str(valor).strip().replace(".0", "")
@@ -146,7 +140,7 @@ def obter_colunas_municipio(sistema, grupo=None):
     if "CNES" in sistema: return ["CODUFMUN"]
     return []
 
-# 🌟 NOVIDADE: A função que filtra TUDO imediatamente após o download para salvar a RAM
+# 🌟 1. EARLY FILTERING: Função executada logo após o DuckDB ler o dado
 def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo, dt_alvos):
     try:
         df_t = df_t.copy()
@@ -155,13 +149,12 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
         col_filtro_real = next((c for c in df_t.columns if c in [x.upper() for x in cols_alvo]), None)
         dt_col_real = next((c for c in df_t.columns if c in dt_alvos), None)
         
-        # Filtro de Estado (SINAN)
         if "SINAN" in sistema and nivel_terr in ["Estado", "Município"] and col_filtro_real:
             codigo_uf_ibge = ESTADOS_IBGE.get(uf, "")
             df_t.loc[:, col_filtro_real] = df_t[col_filtro_real].apply(normalizar_codigo)
             df_t = df_t[df_t[col_filtro_real].str.startswith(codigo_uf_ibge)].copy()
         
-        # Filtro Rigoroso de Município (O GRANDE SALVADOR DE MEMÓRIA)
+        # Filtro Rigoroso de Município (Caso o DuckDB tenha deixado passar algo com ".0")
         if nivel_terr == "Município" and col_filtro_real:
             df_t.loc[:, col_filtro_real] = df_t[col_filtro_real].apply(normalizar_codigo)
             df_t = df_t[df_t[col_filtro_real].str.startswith(id_datasus_alvo)].copy()
@@ -171,14 +164,13 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
             meses_extraidos = extrair_mes_datasus(df_t[dt_col_real])
             df_t = df_t[meses_extraidos == mes_num].copy()
         
-        # Trava de Segurança para o SINAN (Evita o Connection Reset By Peer)
         if "SINAN" in sistema and not df_t.empty and len(df_t) > 50000:
-            print(f"[SINAN ALERTA] Base gigante reduzida de {len(df_t)} para 50000 linhas.")
+            print(f"[SINAN] Base gigante reduzida para 50000 linhas.")
             df_t = df_t.head(50000).copy()
             
         return df_t
     except Exception as e:
-        print(f"[ERRO FILTRO IMEDIATO] Falha ao processar {uf}: {e}")
+        print(f"[ERRO FILTRO IMEDIATO] {e}")
         return pd.DataFrame()
 
 def decodificar_idade_datasus(valor):
@@ -211,9 +203,8 @@ def decodificar_cbo(codigo):
     cod_str = normalizar_codigo(codigo).zfill(6)
     if cod_str in ['', '000000', '999999']: return "Não informado"
     dict_cbo = TABELAS_EXTERNAS.get("CBO", {})
-    if dict_cbo:
-        if cod_str in dict_cbo: return f"{cod_str} - {dict_cbo[cod_str]}"
-        if cod_str[:4] in dict_cbo: return f"{cod_str} - {dict_cbo[cod_str[:4]]}"
+    if dict_cbo and cod_str in dict_cbo: return f"{cod_str} - {dict_cbo[cod_str]}"
+    if dict_cbo and cod_str[:4] in dict_cbo: return f"{cod_str} - {dict_cbo[cod_str[:4]]}"
     cbo_esp = CONFIG_APP.get("CBO_ESPECIFICOS", {})
     if cod_str[:4] in cbo_esp: return f"{cod_str} - {cbo_esp[cod_str[:4]]}"
     return f"{cod_str} - {CONFIG_APP.get('CBO_SUBGRUPOS', {}).get(cod_str[:2], 'Outros')}"
@@ -235,7 +226,6 @@ def decodificar_sigtap(codigo, dict_sigtap):
 def tratar_e_traduzir_df(df, sistema):
     df_tratado = df.copy()
     df_tratado.columns = [str(c).upper().strip() for c in df_tratado.columns]
-    
     sigla_sistema = "SIM" if "SIM" in sistema else "SINASC" if "SINASC" in sistema else "SIH" if "SIH" in sistema else "CNES" if "CNES" in sistema else "SINAN"
     
     dic_dinamico = CONFIG_APP.get("DICIONARIOS_VALORES", {})
@@ -279,46 +269,18 @@ def tratar_e_traduzir_df(df, sistema):
     df_tratado = df_tratado.rename(columns=cabecalhos.get(sigla_sistema, {}))
     return df_tratado
 
-# --- MOTOR DATASUS (DEBUG, FALLBACK FTP E EARLY FILTERING) ---
-
-def fallback_ftp_sih(uf, ano, mes, grupo):
-    yy = str(ano)[-2:]
-    mm = str(mes).zfill(2)
-    filename = f"{grupo.upper()}{uf.upper()}{yy}{mm}.dbc"
-    ftp_path = "/dissemin/publicos/SIHSUS/200801_/Dados/"
-    local_file = f"{filename}"
+# --- 🌟 2. O CORAÇÃO DA ESTABILIDADE: DUCKDB DIRETO NO DISCO ---
+def processar_retorno_pysus(res, cols_alvo=None, id_alvo=""):
+    """
+    Recebe os caminhos Parquet e utiliza DUCKDB para realizar 
+    Predicate Pushdown (Filtro Direto no Disco). Reduz 1GB+ para poucos KBs.
+    """
+    if cols_alvo is None: cols_alvo = []
     
-    print(f"[FALLBACK FTP] Iniciando conexão raiz para {filename}...")
-    try:
-        ftp = ftplib.FTP("ftp.datasus.gov.br", timeout=30)
-        ftp.login()
-        ftp.cwd(ftp_path)
-        with open(local_file, "wb") as f:
-            ftp.retrbinary(f"RETR {filename}", f.write)
-        ftp.quit()
-        
-        from pysus.utilities.readdbc import read_dbc
-        df = read_dbc(local_file, encoding='iso-8859-1')
-        if isinstance(df, pd.DataFrame) and not df.empty:
-            print(f"[FALLBACK FTP] Sucesso absoluto! Linhas: {len(df)}")
-            try: os.remove(local_file)
-            except: pass
-            return df
-    except Exception as e:
-        print(f"[FALLBACK FTP] Falha crítica no FTP: {e}")
-        try: os.remove(local_file)
-        except: pass
-    return pd.DataFrame()
-
-def processar_retorno_pysus(res):
     try:
         if isinstance(res, pd.DataFrame): return res.copy()
         if hasattr(res, 'to_pandas'): return res.to_pandas().copy()
-        if isinstance(res, str):
-            if res.endswith('.parquet'): return pd.read_parquet(res)
-            if res.endswith('.csv'): return pd.read_csv(res)
-            try: return pd.read_parquet(res)
-            except: pass
+        if isinstance(res, str): res = [res]
             
         if isinstance(res, list) and len(res) > 0:
             frames = []
@@ -327,16 +289,48 @@ def processar_retorno_pysus(res):
                 elif isinstance(r, pd.DataFrame): frames.append(r)
                 else:
                     caminho = os.fspath(r) if hasattr(r, "__fspath__") else str(r)
-                    try: frames.append(pd.read_parquet(caminho))
-                    except: pass
+                    
+                    if caminho.endswith('.parquet'):
+                        if id_alvo and cols_alvo:
+                            # 🌟 MÁGICA DO DUCKDB AQUI
+                            try:
+                                import duckdb
+                                cols_parquet = duckdb.query(f"DESCRIBE SELECT * FROM '{caminho}'").df()['column_name'].tolist()
+                                col_filtro = next((c for c in cols_parquet if c.upper() in [x.upper() for x in cols_alvo]), None)
+                                
+                                if col_filtro:
+                                    query = f"SELECT * FROM '{caminho}' WHERE CAST({col_filtro} AS VARCHAR) LIKE '{id_alvo}%'"
+                                    df = duckdb.query(query).df()
+                                    print(f"[DUCKDB SQL] Lendo arquivo '{caminho}' filtrado para o município '{id_alvo}'. Linhas extraídas: {len(df)}")
+                                    frames.append(df)
+                                else:
+                                    frames.append(pd.read_parquet(caminho))
+                            except Exception as e:
+                                print(f"[DUCKDB ALERTA] Falhou. Fallback Pandas ativado. Erro: {e}")
+                                frames.append(pd.read_parquet(caminho))
+                        else:
+                            frames.append(pd.read_parquet(caminho))
+                            
+                    elif caminho.endswith('.csv'): 
+                        frames.append(pd.read_csv(caminho))
+                    else:
+                        try: frames.append(pd.read_parquet(caminho))
+                        except: pass
             if frames: return pd.concat(frames, ignore_index=True)
     except Exception as e:
         print(f"Erro processando arquivo genérico: {e}")
     return pd.DataFrame()
 
-def buscar_sih_seguro(uf, ano, mes, grupo):
-    print(f"[SIH TESTE] Iniciando | UF={uf} | Ano={ano} | Mes={mes:02d} | Grupo={grupo}")
-    df_result = pd.DataFrame()
+def buscar_sih_seguro(uf, ano, mes, grupo, cols_alvo, id_alvo):
+    print(f"[SIH] Tentando via online_data (HTTP Parquet) | {uf} {ano}/{mes} {grupo}")
+    try:
+        from pysus.online_data.SIH import download
+        res = download(states=[uf], years=[ano], months=[mes], groups=[grupo])
+        df = processar_retorno_pysus(res, cols_alvo, id_alvo)
+        if not df.empty: return df
+    except Exception as e:
+        print(f"[SIH ERRO online_data]: {e}")
+
     combinacoes = [
         {"state": uf, "year": ano, "month": mes, "groups": [grupo]},
         {"state": uf, "year": ano, "month": mes, "group": grupo}
@@ -344,24 +338,17 @@ def buscar_sih_seguro(uf, ano, mes, grupo):
     for kwargs in combinacoes:
         try:
             res = api_sih(**kwargs)
-            df_temp = processar_retorno_pysus(res)
-            if not df_temp.empty:
-                print(f"[SIH TESTE] Sucesso via API. Linhas: {len(df_temp)}")
-                df_result = df_temp
-                break
-        except Exception: continue
-
-    if df_result.empty:
-        print("[SIH ALERTA] Catálogo do PySUS falhou. Acionando Fallback FTP...")
-        df_result = fallback_ftp_sih(uf, ano, mes, grupo)
-        
-    return df_result
+            df = processar_retorno_pysus(res, cols_alvo, id_alvo)
+            if not df.empty: return df
+        except: continue
+    return pd.DataFrame()
 
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo=""):
     if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     
     partes_final = [] 
     meses_para_baixar = [mes_num] if mes_num else list(range(1, 13))
+
     cols_alvo = obter_colunas_municipio(sistema, sih_grupo)
     dt_alvos = ["DTOBITO", "DTNASC", "DT_NOTIFIC"]
     
@@ -369,26 +356,27 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
     sucessos_download = 0
 
     for uf in ufs_lista:
+        id_filtro = id_datasus_alvo if nivel_terr == "Município" else ESTADOS_IBGE.get(uf, "")
+        resultados = []
+        
         if "SIH" in sistema or "CNES" in sistema:
             for m in meses_para_baixar:
                 df_temp = pd.DataFrame()
                 try:
                     if "SIH" in sistema:
-                        df_temp = buscar_sih_seguro(uf, ano, m, sih_grupo)
+                        df_temp = buscar_sih_seguro(uf, ano, m, sih_grupo, cols_alvo, id_filtro)
                     elif "CNES" in sistema:
                         try: res = api_cnes(state=uf, year=ano, month=m, groups=[cnes_grupo])
                         except TypeError: res = api_cnes(state=uf, year=ano, month=m, group=cnes_grupo)
-                        df_temp = processar_retorno_pysus(res)
+                        df_temp = processar_retorno_pysus(res, cols_alvo, id_filtro)
                 except Exception as e:
                     falhas.append(f"Erro {sistema} | {uf} {ano}/{m:02d}: {e}")
                     continue
 
-                # 🌟 FILTRO IMEDIATO APLICADO AQUI (DENTRO DO LOOP MENSAL)
                 if not df_temp.empty:
-                    linhas_antes = len(df_temp)
-                    df_temp = aplicar_filtros_imediato(df_temp, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo, dt_alvos)
+                    df_temp = aplicar_filtros_imediato(df_temp, sistema, nivel_terr, uf, id_datasus_alvo, m, cols_alvo, dt_alvos)
                     if not df_temp.empty:
-                        print(f"[FILTRO PRECOCE] {sistema} | {uf} {ano}/{m:02d} | Linhas {linhas_antes} -> {len(df_temp)}")
+                        print(f"[OK] {sistema} | {uf} {ano}/{m:02d} | Armazenado na Memória RAM: {len(df_temp)} linhas.")
                         partes_final.append(df_temp)
                         sucessos_download += 1
                     else:
@@ -397,29 +385,26 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                     falhas.append(f"{sistema} VAZIO NO DOWNLOAD | {uf} {ano}/{m:02d}")
                     
         else:
-            # BLOCO SIM / SINASC / SINAN (Baseada em Ano inteiro, não por mês)
             df_temp = pd.DataFrame()
             try:
                 if "SIM" in sistema: 
                     res = api_sim(state=uf, year=ano)
-                    df_temp = processar_retorno_pysus(res)
+                    df_temp = processar_retorno_pysus(res, cols_alvo, id_filtro)
                 elif "SINASC" in sistema: 
                     res = api_sinasc(state=uf, year=ano)
-                    df_temp = processar_retorno_pysus(res)
+                    df_temp = processar_retorno_pysus(res, cols_alvo, id_filtro)
                 elif "SINAN" in sistema:
                     try: res = api_sinan(disease=agravo, year=ano) 
                     except TypeError: res = api_sinan(disease=agravo, state=uf, year=ano)
-                    df_temp = processar_retorno_pysus(res)
+                    df_temp = processar_retorno_pysus(res, cols_alvo, id_filtro)
             except Exception as e:
                 falhas.append(f"Download Error {sistema} | {uf} {ano}: {e}")
                 continue
 
-            # 🌟 FILTRO IMEDIATO APLICADO AQUI TAMBÉM
             if not df_temp.empty:
-                linhas_antes = len(df_temp)
                 df_temp = aplicar_filtros_imediato(df_temp, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo, dt_alvos)
                 if not df_temp.empty:
-                    print(f"[FILTRO PRECOCE] {sistema} | {uf} {ano} | Linhas {linhas_antes} -> {len(df_temp)}")
+                    print(f"[OK] {sistema} | {uf} {ano} | Armazenado na Memória RAM: {len(df_temp)} linhas.")
                     partes_final.append(df_temp)
                     sucessos_download += 1
                 else:
@@ -427,12 +412,12 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
             else:
                 falhas.append(f"{sistema} VAZIO NO DOWNLOAD | {uf} {ano}")
         
-        gc.collect() # Limpa a RAM a cada UF
+        gc.collect()
             
     if not partes_final:
         if sucessos_download == 0 and len(falhas) > 0:
-            print(f"[ERRO GERAL] Detalhes das falhas: {falhas}")
-            return pd.DataFrame({"Erro": [f"🛑 FALHA DE CONEXÃO. O DATASUS não retornou dados."]})
+            print(f"[ERRO GERAL] Falhas: {falhas}")
+            return pd.DataFrame({"Erro": [f"🛑 FALHA DE CONEXÃO ou ARQUIVO INEXISTENTE. O DATASUS não retornou dados."]})
         else:
             return pd.DataFrame({"Erro": ["⚠️ FALTA DE DADOS: A extração foi realizada, mas a tabela ficou vazia após a filtragem."]})
     
@@ -446,7 +431,7 @@ aba_ativa = st.sidebar.radio("Navegar para:", ["📋 Guia Principal (Extração)
 
 if aba_ativa == "📋 Guia Principal (Extração)":
 
-    st.markdown('<div class="header-sidra"><h1>Central de Inteligência Territorial</h1><p>DATASUS conectado | SIDRA e VIS DATA 3 em desenvolvimento</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="header-sidra"><h1>Central de Inteligência Territorial</h1><p>DATASUS conectado via DuckDB | SIDRA e VIS DATA 3 em desenvolvimento</p></div>', unsafe_allow_html=True)
 
     fonte = st.sidebar.radio("Base de Informação:", ["🏥 Saúde (DATASUS)", "🏠 Social (VIS DATA 3 - Indisponível)"])
     if "VIS DATA 3" in fonte:
@@ -487,7 +472,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
         ano_sel = st.sidebar.selectbox("Ano de Referência:", listar_anos_disponiveis(sistema))
         
         if "SINASC" in sistema and ano_sel >= 2021:
-            st.sidebar.warning("⚠️ **Aviso de Migração:** Os microdados de Nascidos Vivos após 2020 foram movidos para o Portal de Dados Abertos. A conexão nativa (FTP) pode falhar.")
+            st.sidebar.warning("⚠️ **Aviso de Migração:** Os microdados de Nascidos Vivos após 2020 foram movidos para o Portal de Dados Abertos.")
             
         nome_mes = st.sidebar.selectbox("Mês de Competência/Ocorrência (Opcional):", MESES_NOMES)
         mes_sel = None if nome_mes == "Todos os Meses" else int(nome_mes.split(" - ")[0])
@@ -496,21 +481,18 @@ if aba_ativa == "📋 Guia Principal (Extração)":
             submit_button = st.form_submit_button("🔍 Consultar Base")
 
         if submit_button:
-            with st.spinner(f"Processando requisição para {nome_local}... Acompanhe os logs no terminal."):
+            with st.spinner(f"Processando via DuckDB para {nome_local}..."):
                 df_bruto = buscar_datasus_v7(sistema, ufs_selecionadas, ano_sel, mes_sel, agravo_sel, sih_grupo_sel, cnes_grupo_sel, nivel_terr, id_datasus_alvo)
                 
                 if not df_bruto.empty and "Erro" not in df_bruto.columns:
                     df_tratado = tratar_e_traduzir_df(df_bruto, sistema)
-                    
                     sistema_titulo = f"SINAN ({nome_agravo})" if "SINAN" in sistema else f"SIH ({sih_grupo_sel})" if "SIH" in sistema else f"CNES ({cnes_grupo_sel})" if "CNES" in sistema else sistema.split(" (")[0]
                     
                     st.markdown(f'<div class="metric-card"><h2>{len(df_bruto)} Registros Encontrados</h2><p>{sistema_titulo} - {nome_local} ({ano_sel})</p></div>', unsafe_allow_html=True)
-                    
                     if "SINAN" in sistema and len(df_tratado) >= 50000:
-                        st.warning("⚠️ **Limite de Memória Atingido:** O arquivo do SINAN é muito grande. Para evitar o travamento do aplicativo, os dados em tela foram limitados às primeiras 50.000 linhas e o Dashboard automático foi desativado. Por favor, baixe o arquivo `.csv` para análise local completa.")
+                        st.warning("⚠️ O limite de visualização de 50.000 linhas foi acionado por segurança de Memória. Por favor, baixe o CSV para acessar tudo.")
                     
                     tab1, tab2, tab3 = st.tabs(["✅ Planilha Tratada", "⚙️ Planilha Bruta", "📈 Painel de Análises (Dashboards)"])
-                    
                     with tab1:
                         st.dataframe(df_tratado.head(100), width="stretch")
                         st.download_button("📥 Baixar Tabela TRATADA (CSV)", df_tratado.to_csv(index=False, sep=';', decimal=','), f"tratado_{sistema_titulo}_{nome_local}.csv", "text/csv")
@@ -520,7 +502,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                         
                     with tab3:
                         if "SINAN" in sistema and len(df_tratado) >= 50000:
-                            st.info("📊 Os gráficos estão indisponíveis para esta extração devido ao alto volume de dados.")
+                            st.info("📊 Gráficos suspensos preventivamente devido ao volume colossal de linhas.")
                         else:
                             st.subheader(f"📊 Painel Analítico: {sistema_titulo}")
                             if "SIH" in sistema:
@@ -582,7 +564,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                         st.bar_chart(df_tratado[col_cor_mae].value_counts())
                                     
                             elif "CNES" in sistema:
-                                st.write("📈 *O Painel Gráfico prioriza bases clínicas e epidemiológicas. Explore a lista bruta de recursos do CNES na aba de Planilha.*")
+                                st.write("📈 *O Painel Gráfico prioriza bases clínicas e epidemiológicas.*")
                                 
                             elif "SIM" in sistema:
                                 c1, c2 = st.columns(2)
