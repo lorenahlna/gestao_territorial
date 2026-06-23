@@ -91,6 +91,17 @@ def buscar_municipios_por_uf(uf_sigla):
     except:
         return {"Belo Horizonte": {"id7": "3106200", "id6": "310620", "nome": "Belo Horizonte", "uf": "MG"}}
 
+# ✅ FUNÇÕES DE DATA E MÊS RESTAURADAS!
+@st.cache_data
+def listar_anos_disponiveis():
+    return list(range(datetime.now().year, 1995, -1))
+
+MESES_NOMES = [
+    "Todos os Meses", "01 - Janeiro", "02 - Fevereiro", "03 - Março", "04 - Abril",
+    "05 - Maio", "06 - Junho", "07 - Julho", "08 - Agosto",
+    "09 - Setembro", "10 - Outubro", "11 - Novembro", "12 - Dezembro"
+]
+
 # --- TRATADORES DE DADOS ---
 
 def decodificar_idade_datasus(valor):
@@ -157,7 +168,7 @@ def tratar_e_traduzir_df(df, sistema):
     if "IDADE" in df_tratado.columns: df_tratado["IDADE"] = df_tratado["IDADE"].apply(decodificar_idade_datasus)
     if "IDADEMAE" in df_tratado.columns: 
         df_tratado["IDADEMAE"] = df_tratado["IDADEMAE"].apply(decodificar_idade_datasus)
-        df_tratado["GRUPO_IDADE_MAE"] = df_tratado["IDADEMAE"].apply(agrupar_idade_mae) # 🌟 NOVA COLUNA DE GRUPO ETÁRIO
+        df_tratado["GRUPO_IDADE_MAE"] = df_tratado["IDADEMAE"].apply(agrupar_idade_mae)
     if "NU_IDADE_N" in df_tratado.columns: df_tratado["NU_IDADE_N"] = df_tratado["NU_IDADE_N"].apply(decodificar_idade_datasus)
 
     # CBO
@@ -333,7 +344,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
         
         ano_sel = st.sidebar.selectbox("Ano de Referência:", listar_anos_disponiveis())
         
-        # ⚠️ ALERTA DO SINASC INTELIGENTE
         if "SINASC" in sistema and ano_sel >= 2021:
             st.sidebar.warning("⚠️ **Aviso de Migração Governamental:** Os microdados de Nascidos Vivos após 2020 foram movidos para o Portal de Dados Abertos. A conexão nativa (FTP) pode falhar.")
             st.info("Caso a extração automática falhe, você pode fazer o [Download Manual do CSV do SINASC clicando aqui](https://dados.gov.br/dados/conjuntos-dados/sistema-de-informacoes-sobre-nascidos-vivos-sinasc) e utilizá-lo nas suas ferramentas de análise.")
@@ -361,15 +371,11 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                         st.dataframe(df_bruto.head(100), use_container_width=True)
                         st.download_button("📥 Baixar Tabela BRUTA (CSV)", df_bruto.to_csv(index=False, sep=';', decimal=','), f"bruto_{sistema_titulo}_{nome_local}.csv", "text/csv")
                         
-                    # 🌟 DASHBOARDS DINÂMICOS
                     with tab3:
                         st.subheader(f"📊 Painel Analítico: {sistema_titulo}")
                         
                         if "SIH" in sistema:
-                            # DASHBOARD SIH (ECONOMIA E DESFECHO)
                             c1, c2, c3 = st.columns(3)
-                            
-                            # Tratamento Numérico Seguro
                             for c_val in ["Valor Total AIH (R$)", "Valor UTI (R$)"]:
                                 if c_val in df_tratado.columns:
                                     df_tratado[f"Num_{c_val}"] = pd.to_numeric(df_tratado[c_val].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
@@ -380,6 +386,11 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             c1.metric("💰 Custo Total Pago (AIH)", f"R$ {soma_tot:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
                             c2.metric("🏥 Custo em UTI", f"R$ {soma_uti:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
                             
+                            col_sexo = next((c for c in df_tratado.columns if "Sexo" in c), None)
+                            if col_sexo:
+                                st.write(f"**Distribuição por {col_sexo}**")
+                                st.bar_chart(df_tratado[col_sexo].value_counts())
+
                             if "Desfecho (Alta/Óbito)" in df_tratado.columns:
                                 st.write("**Desfecho da Internação (Morte/Alta)**")
                                 st.bar_chart(df_tratado["Desfecho (Alta/Óbito)"].value_counts())
@@ -395,7 +406,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     st.bar_chart(df_tratado["Diagnóstico Principal (CID-10)"].value_counts().head(10))
                                 
                         elif "SINASC" in sistema:
-                            # DASHBOARD SINASC (PERFIL MATERNO)
                             c1, c2 = st.columns(2)
                             with c1:
                                 if "Faixa Etária da Mãe" in df_tratado.columns:
@@ -415,7 +425,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             st.write("📈 *O Painel Gráfico prioriza bases clínicas e epidemiológicas. Explore a lista bruta de recursos na Planilha.*")
                             
                         else:
-                            # DASHBOARD SIM E SINAN
                             c1, c2 = st.columns(2)
                             col_sexo = next((c for c in df_tratado.columns if "Sexo" in c), None)
                             if col_sexo:
@@ -457,5 +466,50 @@ if aba_ativa == "📋 Guia Principal (Extração)":
 elif aba_ativa == "📚 Dicionários e Citações":
     st.title("📚 Dicionários e Metadados")
     st.markdown("Consulte os Manuais Oficiais para entender a Planilha Tratada:")
-    # ... (Mantenha os conteúdos do Expander de Dicionários que enviei na resposta anterior)
+    
+    with st.expander("🏥 CNES (Cadastro Nacional de Estabelecimentos de Saúde)"):
+        st.markdown("""
+        O CNES é desdobrado em várias tabelas. As principais utilizadas no cruzamento e mapeamento são:
+        * **Tabela ST (Estabelecimentos):** Contém os dados básicos de cada estabelecimento de saúde ativo no Brasil (localização, natureza jurídica, tipo de unidade). A chave `CNES` liga com SIH e SIA.
+        * **Tabela PF (Profissionais):** Relação de profissionais vinculados, com código `CBO` e carga horária.
+        * **Tabela EQ (Equipamentos):** Lista de equipamentos médicos vinculados ao estabelecimento.
+        """)
+
+    with st.expander("🛏️ SIH (Sistema de Informações Hospitalares)"):
+        st.markdown("""
+        * **Resumo:** Dados de internações hospitalares pelo SUS. A tabela do tipo RD (AIH Reduzida) contém o resumo clínico e financeiro da internação.
+        * **DIAG_PRINC / DIAG_SECUN:** Diagnósticos registrados em formato CID-10, passíveis de mapeamento automático.
+        * **PROC_REA / PROC_SOLIC:** Procedimentos realizados e solicitados. Cruzados automaticamente com a tabela SIGTAP.
+        * **CGC_HOSP:** Identificação do hospital que pode ser relacionada ao Cadastro Nacional de Estabelecimentos (CNES).
+        """)
+
+    with st.expander("💀 SIM (Sistema de Informações sobre Mortalidade)"):
+        st.markdown("""
+        * **Resumo:** Registros de óbitos com campos demográficos e causas de morte codificadas por CID-10.
+        * **CAUSABAS:** A causa básica do óbito (CID-10), crucial para análises de mortalidade.
+        * **ESTCIV (Estado Civil):** 1-Solteiro | 2-Casado | 3-Viúvo | 4-Separado | 5-União estável | 9-Ignorado.
+        * **ESC (Escolaridade em Anos):** Traduzido pelo sistema para o formato 2010 (Sem escolaridade, Fundamental I/II, Médio, Superior).
+        * **OCUP (Ocupação):** Ramo de atividade, mapeado através do CBO-2002.
+        * **TIPOBITO:** 1-Fetal | 2-Não fetal.
+        * **CIRCOBITO:** 1-Acidente | 2-Suicídio | 3-Homicídio | 4-Outros.
+        """)
+        
+    with st.expander("👶 SINASC (Sistema de Informações sobre Nascidos Vivos)"):
+        st.markdown("""
+        * **Resumo:** Dados sobre os recém-nascidos, perfil demográfico das mães e características do parto no Brasil.
+        * **ESTCIVMAE (Estado Civil da Mãe):** 1-Solteira | 2-Casada | 3-Viúva | 4-Separada | 5-União Consensual | 9-Ignorado.
+        * **ESCMAE (Escolaridade da Mãe):** O sistema categoriza em ciclos de ensino.
+        * **GRAVIDEZ:** 1-Única | 2-Dupla | 3-Tripla ou mais.
+        * **PARTO:** 1-Vaginal | 2-Cesáreo.
+        * **PESO:** Peso do nascido vivo em gramas.
+        """)
+
+    with st.expander("🩺 SINAN (Sistema de Informação de Agravos de Notificação)"):
+        st.markdown("""
+        * **CS_ESCOL_N (Escolaridade):** 00-Sem instrução | 01-Fundamental I | 02-Fundamental II | 03-Médio | 04-Superior | 05-Não se aplica | 09-Ignorado.
+        * **CS_EST_CIV (Estado Civil):** 1-Solteiro | 2-Casado | 3-Viúvo | 4-Separado/Divorciado | 9-Ignorado.
+        * **CS_SEXO:** M-Masculino | F-Feminino | I-Ignorado.
+        * **CS_RACA:** 1-Branca | 2-Preta | 3-Amarela | 4-Parda | 5-Indígena | 9-Ignorado.
+        """)
+        
     st.info("Sempre cite as fontes originais: BRASIL. Ministério da Saúde. DATASUS.")
