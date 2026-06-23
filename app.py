@@ -776,11 +776,11 @@ elif aba_ativa == "📚 Dicionários e Citações":
         * **SIM e SINASC (Óbitos e Nascimentos):** São os mais lentos devido à burocracia de cartórios e validações. Dados do ano corrente são sempre \"Preliminares\". A base consolidada pode levar até **2 anos** para ser fechada.
         """)
 
-    with st.expander("🛑 Limitações Recentes do SINASC (A partir de 2020)"):
+    with st.expander("🛑 Limitações Recentes do SINASC (A partir de 2021)"):
         st.markdown("""
-        * **O que acontece:** O Ministério da Saúde reestruturou a forma de armazenar os dados de Nascidos Vivos no servidor FTP a partir de 2020 (devido a mudanças de formulário e LGPD).
+        * **O que acontece:** O Ministério da Saúde reestruturou a forma de armazenar os dados de Nascidos Vivos no servidor FTP a partir de 2021 (devido a mudanças de formulário e LGPD).
         * **Impacto na Extração:** A ferramenta PySUS pode não conseguir localizar as pastas recentes automaticamente no servidor raiz antigo.
-        * **Solução Alternativa:** Para dados de 2020 em diante, caso a extração retorne vazia, recomenda-se o download manual do `.csv` diretamente no **Portal de Dados Abertos do Governo Federal**.
+        * **Solução Alternativa:** Para dados de 2021 em diante, caso a extração retorne vazia, recomenda-se o download manual do `.csv` diretamente no **Portal de Dados Abertos do Governo Federal**.
         """)
         
     st.markdown("---")
