@@ -1,4 +1,4 @@
-# VERSAO_VALIDADA_V4_FUNCAO_TRATAR_E_TRADUZIR_PRESENTE
+# VERSAO_VALIDADA_V5_SINAN_SEGMENTADO_POR_UF
 import streamlit as st
 import pandas as pd
 import requests
@@ -316,8 +316,14 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                     res = api_sinasc(state=uf, year=ano)
                     df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo, id_filtro, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado)
                 elif "SINAN" in sistema:
-                    try: res = api_sinan(disease=agravo, year=ano) 
-                    except TypeError: res = api_sinan(disease=agravo, state=uf, year=ano)
+                    # 🌟 REVOLUÇÃO DO SINAN: Tenta baixar o arquivo segmentado por UF primeiro, evitando travar a Dengue!
+                    try:
+                        from pysus.online_data.SINAN import download as download_sinan
+                        res = download_sinan(disease=agravo, years=[ano], states=[uf])
+                    except Exception as e:
+                        print(f"[SINAN ALERTA] Falha segmentada ({e}). Tentando modo nacional padrão...")
+                        try: res = api_sinan(disease=agravo, year=ano)
+                        except TypeError: res = api_sinan(disease=agravo, state=uf, year=ano)
                     df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo, id_filtro, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado)
             except Exception as e:
                 falhas.append(f"Download Error {sistema} | {uf} {ano}: {e}")
@@ -400,7 +406,6 @@ def decodificar_sigtap(codigo, dict_sigtap):
     if dict_sigtap and cod in dict_sigtap: return f"{cod} - {dict_sigtap[cod]}"
     return cod
 
-# 🌟 A FUNÇÃO CRÍTICA QUE ESTAVA FALTANDO ANTES DO CORRETO CARREGAMENTO NO ESCOPO GLOBAL 🌟
 def tratar_e_traduzir_df(df, sistema):
     df_tratado = df.copy()
     df_tratado.columns = [str(c).upper().strip() for c in df_tratado.columns]
@@ -454,7 +459,7 @@ aba_ativa = st.sidebar.radio("Navegar para:", ["📋 Guia Principal (Extração)
 
 if aba_ativa == "📋 Guia Principal (Extração)":
 
-    st.markdown('<div class="header-sidra"><h1>Central de Inteligência Territorial</h1><p>DATASUS conectado via DuckDB | SIDRA e VIS DATA 3 em desenvolvimento</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="header-sidra"><h1>Central de Inteligência Territorial</h1><p>DATASUS conectado | VIS DATA 3 em desenvolvimento</p></div>', unsafe_allow_html=True)
 
     fonte = st.sidebar.radio("Base de Informação:", ["🏥 Saúde (DATASUS)", "🏠 Social (VIS DATA 3 - Indisponível)"])
     if "VIS DATA 3" in fonte:
@@ -472,7 +477,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
     elif nivel_terr == "Município":
         uf_sel = st.sidebar.selectbox("Filtrar Estado:", ufs_ordenadas, index=ufs_ordenadas.index("MG"))
         muns_estado = buscar_municipios_por_uf(uf_sel)
-        mun_nome = st.sidebar.selectbox("Selecione o Município:", sorted(muns_estado.keys()))
+        mun_nome = st.sidebar.selectbox("Selecione o Municipio:", sorted(muns_estado.keys()))
         dados_mun = muns_estado[mun_nome]
         ufs_selecionadas = [uf_sel]; id_ibge_alvo = dados_mun['id7']; id_datasus_alvo = dados_mun['id6']; nome_local = mun_nome
 
@@ -671,7 +676,7 @@ elif aba_ativa == "📚 Dicionários e Citações":
 
     with st.expander("🛏️ SIH (Sistema de Informações Hospitalares)"):
         st.markdown("""
-        * **Resumo:** Dados de internações hospitalares pelo SUS. A tabela do tipo RD (AIH Reduzida) contém o resumo clínico e financeiro da internação.
+        * **Resumo:** Dados de internações hospitalares pelo SUS. A tabela do tipo RD (AIH Reduzica) contém o resumo clínico e financeiro da internação.
         * **DIAG_PRINC / DIAG_SECUN:** Diagnósticos registrados em formato CID-10, passíveis de mapeamento automático.
         * **PROC_REA / PROC_SOLIC:** Procedimentos realizados e solicitados. Cruzados automaticamente com a tabela SIGTAP.
         * **CGC_HOSP:** Identificação do hospital que pode ser relacionada ao Cadastro Nacional de Estabelecimentos (CNES).
