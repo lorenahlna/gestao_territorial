@@ -48,26 +48,25 @@ CONFIG_APP = carregar_dicionarios_github()
 
 @st.cache_data(show_spinner=False)
 def carregar_tabelas_cartaproale():
-    """Baixa dicionários pesados em CSV diretamente do repositório indicado"""
+    """Baixa dicionários pesados em CSV (CBO, CID10, SIGTAP)"""
     BASE_RAW_URL = "https://raw.githubusercontent.com/cartaproale/PySUS/main/tabelas/"
-    tabelas = {"CBO": {}, "CID10": {}}
+    tabelas = {"CBO": {}, "CID10": {}, "SIGTAP": {}}
     
-    # 1. Tabela CBO (Profissões)
     try:
-        # ⚠️ AJUSTE: Se o nome da tabela CBO for diferente no repo deles, altere o "cbo.csv" abaixo
         df_cbo = pd.read_csv(BASE_RAW_URL + "cbo.csv", sep=";", dtype=str, encoding='utf-8')
-        # Cria o dicionário onde a Coluna 1 é a chave (Código) e a Coluna 2 é o valor (Descrição)
         tabelas["CBO"] = dict(zip(df_cbo.iloc[:, 0], df_cbo.iloc[:, 1]))
-    except:
-        pass
+    except: pass
         
-    # 2. Tabela CID-10 (Doenças)
     try:
-        # ⚠️ AJUSTE: Se o nome da tabela CID for diferente, altere o "cid10.csv" abaixo
         df_cid = pd.read_csv(BASE_RAW_URL + "cid10.csv", sep=";", dtype=str, encoding='utf-8')
         tabelas["CID10"] = dict(zip(df_cid.iloc[:, 0], df_cid.iloc[:, 1]))
-    except:
-        pass
+    except: pass
+    
+    try:
+        SIGTAP_URL = "https://raw.githubusercontent.com/cartaproale/PySUS/main/Referencias/tb_procedimento.csv"
+        df_sigtap = pd.read_csv(SIGTAP_URL, sep=";", dtype=str, encoding='utf-8')
+        tabelas["SIGTAP"] = dict(zip(df_sigtap.iloc[:, 0], df_sigtap.iloc[:, 1]))
+    except: pass
         
     return tabelas
 
@@ -118,57 +117,52 @@ MESES_NOMES = [
 # --- TRATADORES COM RECURSOS DO GITHUB INTEGRADOS ---
 
 def decodificar_idade_datasus(valor):
-    if pd.isna(valor) or str(valor).strip() == '': return "Não informado"
+    if pd.isna(valor) or str(valor).strip() in ['', 'None', 'nan']: return "Não informado"
     try:
-        valor_str = str(int(float(valor))).zfill(3)
-        if len(valor_str) == 3:
-            u, q = valor_str[0], int(valor_str[1:])
+        v_str = str(int(float(valor))) 
+        if len(v_str) in [1, 2]: return f"{v_str} Ano(s)"
+        
+        if len(v_str) >= 3:
+            u = v_str[0]
+            q = int(v_str[1:])
             if u == '1': return f"{q} Minuto(s)"
             elif u == '2': return f"{q} Hora(s)"
             elif u == '3': return f"{q} Mês(es)"
             elif u == '4': return f"{q} Ano(s)"
             elif u == '5': return f"{100 + q} Ano(s)"
-            else: return f"{q} (Und. ñ identificada)"
-        elif len(valor_str) == 2: return f"{int(valor_str)} Ano(s)"
-        else: return str(valor)
-    except: return "Erro na Leitura"
+            else: return f"{q} (Und. ñ ident.)"
+    except: return str(valor)
 
 def decodificar_cbo_github(codigo, dict_cbo_repo):
     if pd.isna(codigo) or str(codigo).strip() in ['', 'None', 'nan', '999999', '000000']: 
         return "Não informado / Ignorado"
-    
     cod_str = str(codigo).split('.')[0].zfill(6)
     
-    # Plano A: Usa a tabela CSV gigante do repositório 'cartaproale'
     if dict_cbo_repo:
         if cod_str in dict_cbo_repo: return f"{cod_str} - {dict_cbo_repo[cod_str]}"
         if cod_str[:4] in dict_cbo_repo: return f"{cod_str} - {dict_cbo_repo[cod_str[:4]]}"
         if cod_str[:2] in dict_cbo_repo: return f"{cod_str} - {dict_cbo_repo[cod_str[:2]]}"
     
-    # Plano B: Usa a tabela condensada em JSON do seu repositório
     cbo_especificos = CONFIG_APP.get("CBO_ESPECIFICOS", {})
     cbo_subgrupos = CONFIG_APP.get("CBO_SUBGRUPOS", {})
-    
-    if cod_str[:4] in cbo_especificos:
-        return f"{cod_str} - {cbo_especificos[cod_str[:4]]}"
-        
+    if cod_str[:4] in cbo_especificos: return f"{cod_str} - {cbo_especificos[cod_str[:4]]}"
     prefixo_2 = cod_str[:2]
     grupo_nome = cbo_subgrupos.get(prefixo_2, "Ocupação geral/Não classificada")
     return f"{cod_str} - {grupo_nome}"
 
 def decodificar_cid_github(codigo, dict_cid_repo):
-    if pd.isna(codigo) or str(codigo).strip() in ['', 'None', 'nan']: 
-        return "Não informado"
-    
+    if pd.isna(codigo) or str(codigo).strip() in ['', 'None', 'nan']: return "Não informado"
     cod_str = str(codigo).strip().upper()
-    
-    # Tenta cruzar com a tabela de Doenças do 'cartaproale'
     if dict_cid_repo:
         if cod_str in dict_cid_repo: return f"{cod_str} - {dict_cid_repo[cod_str]}"
         if cod_str[:3] in dict_cid_repo: return f"{cod_str} - {dict_cid_repo[cod_str[:3]]}"
-        return f"{cod_str} - CID não mapeada no dicionário"
-    
-    # Se a tabela falhar em carregar, devolve a sigla original
+    return cod_str
+
+def decodificar_sigtap_github(codigo, dict_sigtap_repo):
+    if pd.isna(codigo) or str(codigo).strip() in ['', 'None', 'nan']: return "Não informado"
+    cod_str = str(codigo).strip().zfill(10)
+    if dict_sigtap_repo and cod_str in dict_sigtap_repo:
+        return f"{cod_str} - {dict_sigtap_repo[cod_str]}"
     return cod_str
 
 def tratar_e_traduzir_df(df, sistema):
@@ -179,18 +173,22 @@ def tratar_e_traduzir_df(df, sistema):
     if sigla_sistema == "SINASC" and "IDADEMAE" in df_tratado.columns: df_tratado["IDADEMAE"] = df_tratado["IDADEMAE"].apply(decodificar_idade_datasus)
     if sigla_sistema == "SINAN" and "NU_IDADE_N" in df_tratado.columns: df_tratado["NU_IDADE_N"] = df_tratado["NU_IDADE_N"].apply(decodificar_idade_datasus)
 
-    # Aplicação do CBO Github
     dict_cbo = TABELAS_CARTAPROALE.get("CBO", {})
     if "OCUP" in df_tratado.columns: df_tratado["OCUP"] = df_tratado["OCUP"].apply(lambda x: decodificar_cbo_github(x, dict_cbo))
     if "OCUPMAE" in df_tratado.columns: df_tratado["OCUPMAE"] = df_tratado["OCUPMAE"].apply(lambda x: decodificar_cbo_github(x, dict_cbo))
     if "ID_OCUPA_N" in df_tratado.columns: df_tratado["ID_OCUPA_N"] = df_tratado["ID_OCUPA_N"].apply(lambda x: decodificar_cbo_github(x, dict_cbo))
 
-    # Aplicação do CID-10 Github
     dict_cid = TABELAS_CARTAPROALE.get("CID10", {})
-    colunas_doencas = ["CAUSABAS", "CAUSABAS_O", "DIAG_PRINC", "CODANOMAL"]
+    colunas_doencas = ["CAUSABAS", "CAUSABAS_O", "DIAG_PRINC", "CODANOMAL", "DIAG_SECUN", "ID_AGRAVO"]
     for col in colunas_doencas:
         if col in df_tratado.columns:
             df_tratado[col] = df_tratado[col].apply(lambda x: decodificar_cid_github(x, dict_cid))
+
+    dict_sigtap = TABELAS_CARTAPROALE.get("SIGTAP", {})
+    colunas_procedimentos = ["PROC_REA", "PROC_SOLIC"]
+    for col in colunas_procedimentos:
+        if col in df_tratado.columns:
+            df_tratado[col] = df_tratado[col].apply(lambda x: decodificar_sigtap_github(x, dict_sigtap))
 
     dict_valores = CONFIG_APP.get("DICIONARIOS_VALORES", {}).get(sigla_sistema, {})
     for coluna, de_para in dict_valores.items():
@@ -399,61 +397,41 @@ if aba_ativa == "📋 Guia Principal (Extração)":
         
         if sistema == "Notificações (SINAN)":
             mapa_doencas = {
-                "Acidente de trabalho": "ACGR",
-                "Acidente de trabalho com material biológico": "ACBI",
-                "AIDS em adultos": "AIDA",
-                "AIDS em crianças": "AIDC",
-                "Câncer Relacionado ao Trabalho": "CANC",
-                "Chikungunya": "CHIK",
-                "Dengue": "DENG",
-                "Doença de Chagas": "CHAG",
-                "Hepatites Virais": "HEPA",
-                "HIV em adultos": "HIVA",
-                "HIV em crianças": "HIVC",
-                "HIV em crianças expostas": "HIVE",
-                "Leptospirose": "LEPT",
-                "Meningite": "MENI",
-                "Perda Auditiva por Ruído (Trabalho)": "PAIR",
-                "Raiva Humana": "RAIV",
-                "Sífilis Adquirida": "SIFA",
-                "Sífilis Congênita": "SIFC",
-                "Sífilis em Gestante": "SIFG",
-                "Transtornos Mentais (Trabalho)": "MENT",
-                "Tuberculose": "TUBE",
-                "Varicela": "VARI",
-                "Violência doméstica, sexual e/ou outras": "VIOL",
-                "Zika Vírus": "ZIKA"
+                "Acidente de trabalho": "ACGR", "Acidente de trabalho com material biológico": "ACBI",
+                "AIDS em adultos": "AIDA", "AIDS em crianças": "AIDC", "Câncer Relacionado ao Trabalho": "CANC",
+                "Chikungunya": "CHIK", "Dengue": "DENG", "Doença de Chagas": "CHAG", "Hepatites Virais": "HEPA",
+                "HIV em adultos": "HIVA", "HIV em crianças": "HIVC", "HIV em crianças expostas": "HIVE",
+                "Leptospirose": "LEPT", "Meningite": "MENI", "Perda Auditiva por Ruído (Trabalho)": "PAIR",
+                "Raiva Humana": "RAIV", "Sífilis Adquirida": "SIFA", "Sífilis Congênita": "SIFC", "Sífilis em Gestante": "SIFG",
+                "Transtornos Mentais (Trabalho)": "MENT", "Tuberculose": "TUBE", "Varicela": "VARI",
+                "Violência doméstica, sexual e/ou outras": "VIOL", "Zika Vírus": "ZIKA"
             }
             nome_agravo = st.sidebar.selectbox("Doença/Agravo:", sorted(list(mapa_doencas.keys())))
             agravo_sel = mapa_doencas[nome_agravo]
             
         elif sistema == "Internações (SIH)":
             mapa_sih = {
-                "RD - Registros de Internações (Padrão)": "RD",
-                "SP - Serviços Profissionais": "SP",
-                "ER - Emergência Referenciada": "ER",
-                "CM - Cirurgias Ambulatoriais": "CM"
+                "RD - Registros de Internações (Padrão)": "RD", "SP - Serviços Profissionais": "SP",
+                "ER - Emergência Referenciada": "ER", "CM - Cirurgias Ambulatoriais": "CM"
             }
             nome_sih = st.sidebar.selectbox("Grupo de Dados (SIH):", list(mapa_sih.keys()))
             sih_grupo_sel = mapa_sih[nome_sih]
             
         elif sistema == "Cadastro Nacional de Estabelecimentos (CNES)":
             mapa_cnes = {
-                "ST - Estabelecimentos": "ST",
-                "PF - Profissionais": "PF",
-                "SR - Serviços": "SR",
-                "HB - Habilitações": "HB",
-                "IN - Incentivos": "IN",
-                "EP - Estabelecimento por Procedimento": "EP",
-                "EQ - Equipamentos": "EQ",
-                "LT - Leitos": "LT",
-                "DC - Dados Complementares": "DC"
+                "ST - Estabelecimentos": "ST", "PF - Profissionais": "PF", "SR - Serviços": "SR",
+                "HB - Habilitações": "HB", "IN - Incentivos": "IN", "EP - Estabelecimento por Procedimento": "EP",
+                "EQ - Equipamentos": "EQ", "LT - Leitos": "LT", "DC - Dados Complementares": "DC"
             }
             nome_cnes = st.sidebar.selectbox("Grupo de Dados (CNES):", list(mapa_cnes.keys()))
             cnes_grupo_sel = mapa_cnes[nome_cnes]
         
         ano_sel = st.sidebar.selectbox("Ano de Referência:", listar_anos_disponiveis())
         
+        # ⚠️ ALERTA DO SINASC
+        if sistema == "Nascimentos (SINASC)" and ano_sel > 2020:
+            st.warning("⚠️ **Atenção:** Em 2011 o SINASC sofreu alterações e, para dados de 2021 em diante, a estrutura do FTP do Governo Federal foi modificada. A extração oficial (PySUS) pode apresentar instabilidade ou retornar vazia para anos recentes.")
+            
         nome_mes = st.sidebar.selectbox("Mês de Competência/Ocorrência (Opcional):", MESES_NOMES)
         mes_sel = None if nome_mes == "Todos os Meses" else int(nome_mes.split(" - ")[0])
         
@@ -517,63 +495,98 @@ if aba_ativa == "📋 Guia Principal (Extração)":
         </div>
     """, unsafe_allow_html=True)
 
-# 🌟 ABA DE DICIONÁRIOS E CITAÇÕES
+# 🌟 ABA DE DICIONÁRIOS E CITAÇÕES ATUALIZADA
 elif aba_ativa == "📚 Dicionários e Citações":
     st.title("📚 Dicionários de Dados e Normas de Citação")
     st.markdown("---")
     
     st.header("1. Dicionários de Dados (Variáveis)")
-    st.write("Abaixo estão os resumos das principais variáveis que o sistema traduz automaticamente na **Planilha Tratada** com base nos Manuais Oficiais do Ministério da Saúde:")
+    st.write("Abaixo estão os resumos das principais variáveis processadas e traduzidas automaticamente na **Planilha Tratada**, com base na estrutura dos formulários governamentais:")
     
+    with st.expander("🏥 CNES (Cadastro Nacional de Estabelecimentos de Saúde)"):
+        st.markdown("""
+        O CNES é desdobrado em várias tabelas. As principais utilizadas no cruzamento e mapeamento são:
+        * **Tabela ST (Estabelecimentos):** Contém os dados básicos de cada estabelecimento de saúde ativo no Brasil (localização, natureza jurídica, tipo de unidade). A chave `CNES` liga com SIH e SIA.
+        * **Tabela PF (Profissionais):** Relação de profissionais vinculados, com código `CBO` e carga horária.
+        * **Tabela EQ (Equipamentos):** Lista de equipamentos médicos vinculados ao estabelecimento.
+        """)
+
+    with st.expander("🛏️ SIH (Sistema de Informações Hospitalares)"):
+        st.markdown("""
+        * **Resumo:** Dados de internações hospitalares pelo SUS. A tabela do tipo RD (AIH Reduzida) contém o resumo clínico e financeiro da internação.
+        * **DIAG_PRINC / DIAG_SECUN:** Diagnósticos registrados em formato CID-10, passíveis de mapeamento automático.
+        * **PROC_REA / PROC_SOLIC:** Procedimentos realizados e solicitados. Cruzados automaticamente com a tabela SIGTAP.
+        * **CGC_HOSP:** Identificação do hospital que pode ser relacionada ao Cadastro Nacional de Estabelecimentos (CNES).
+        """)
+
     with st.expander("💀 SIM (Sistema de Informações sobre Mortalidade)"):
         st.markdown("""
-        * **ESTCIV (Estado Civil):** 1-Solteiro | 2-Casado | 3-Viúvo | 4-Separado/Divorciado | 5-União estável | 9-Ignorado
-        * **ESC2010 (Escolaridade):** 0-Sem escolaridade | 1-Fundamental I | 2-Fundamental II | 3-Médio | 4-Superior incompleto | 5-Superior completo | 9-Ignorado
-        * **OCUP (Ocupação):** Traduzido automaticamente pelos dicionários externos (CBO-2002).
-        * **CAUSABAS (Causa Básica):** Traduzido automaticamente pelo dicionário CID-10 integrado via Github.
-        * **TIPOBITO:** 1-Fetal | 2-Não fetal
-        * **CIRCOBITO (Circunstância):** 1-Acidente | 2-Suicídio | 3-Homicídio | 4-Outros
-        * **LOCOCOR (Local de Ocorrência):** 1-hospital | 2-outros estabelecimentos de saúde | 3-domicílio | 4-via pública | 5-outros | 6-aldeia indigena | 9-ignorado
+        * **Resumo:** Registros de óbitos com campos demográficos e causas de morte codificadas por CID-10.
+        * **CAUSABAS:** A causa básica do óbito (CID-10), crucial para análises de mortalidade.
+        * **ESTCIV (Estado Civil):** 1-Solteiro | 2-Casado | 3-Viúvo | 4-Separado | 5-União estável | 9-Ignorado.
+        * **ESC (Escolaridade em Anos):** Traduzido pelo sistema para o formato 2010 (Sem escolaridade, Fundamental I/II, Médio, Superior).
+        * **OCUP (Ocupação):** Ramo de atividade, mapeado através do CBO-2002.
+        * **TIPOBITO:** 1-Fetal | 2-Não fetal.
+        * **CIRCOBITO:** 1-Acidente | 2-Suicídio | 3-Homicídio | 4-Outros.
         """)
         
     with st.expander("👶 SINASC (Sistema de Informações sobre Nascidos Vivos)"):
         st.markdown("""
-        * **ESTCIVMAE (Estado Civil da Mãe):** 1-Solteira | 2-Casada | 3-Viúva | 4-Separada/Divorciada | 5-União Consensual | 9-Ignorado
-        * **ESCMAE2010 (Escolaridade da Mãe):** 0-Sem escolaridade | 1-Fundamental I | 2-Fundamental II | 3-Médio | 4-Superior incompleto | 5-Superior completo | 9-Ignorado
-        * **GRAVIDEZ:** 1-Única | 2-Dupla | 3-Tripla ou mais | 9-Ignorada
-        * **PARTO:** 1-Vaginal | 2-Cesáreo | 9-Ignorado
-        * **PESO:** Peso ao nascer em gramas
+        * **Resumo:** Dados sobre os recém-nascidos, perfil demográfico das mães e características do parto no Brasil.
+        * **ESTCIVMAE (Estado Civil da Mãe):** 1-Solteira | 2-Casada | 3-Viúva | 4-Separada | 5-União Consensual | 9-Ignorado.
+        * **ESCMAE (Escolaridade da Mãe):** O sistema categoriza em ciclos de ensino.
+        * **GRAVIDEZ:** 1-Única | 2-Dupla | 3-Tripla ou mais.
+        * **PARTO:** 1-Vaginal | 2-Cesáreo.
+        * **PESO:** Peso do nascido vivo em gramas.
         """)
 
     with st.expander("🩺 SINAN (Sistema de Informação de Agravos de Notificação)"):
         st.markdown("""
-        * **CS_ESCOL_N (Escolaridade):** 00-Sem instrução | 01-Fundamental I | 02-Fundamental II | 03-Médio | 04-Superior | 05-Não se aplica | 09-Ignorado
-        * **CS_EST_CIV (Estado Civil):** 1-Solteiro | 2-Casado | 3-Viúvo | 4-Separado/Divorciado | 9-Ignorado
-        * **EVOLUCAO (Evolução do Caso):** 1-Cura | 2-Óbito pelo agravo | 3-Óbito por outras causas | 9-Ignorado
-        * **st_transmissao_vertical (Transmissão Vertical):** 1-Sim | 2-Não foi transmissão vertical | 9-Ignorado
-        * **tp_sexual (Transmissão Sexual):** 1-Relações sexuais com Homens | 2-Relações sexuais com Mulheres | 3-Relações sexuais com homens e mulheres | 4-Não foi transmissão sexual | 9-Ignorado
+        * **CS_ESCOL_N (Escolaridade):** 00-Sem instrução | 01-Fundamental I | 02-Fundamental II | 03-Médio | 04-Superior | 05-Não se aplica | 09-Ignorado.
+        * **CS_EST_CIV (Estado Civil):** 1-Solteiro | 2-Casado | 3-Viúvo | 4-Separado/Divorciado | 9-Ignorado.
+        * **CS_SEXO:** M-Masculino | F-Feminino | I-Ignorado.
+        * **CS_RACA:** 1-Branca | 2-Preta | 3-Amarela | 4-Parda | 5-Indígena | 9-Ignorado.
         """)
         
-    with st.expander("📂 Dicionários Externos Integrados (Repositório PySUS)"):
+    with st.expander("📂 Tabelas Complementares Integradas (SIGTAP, CID-10, CBO)"):
         st.markdown("""
-        O sistema implementa uma engenharia de dados desacoplada, consultando os dicionários mestre diretamente da documentação oficial acessível validada do projeto PySUS no GitHub.
+        O sistema consulta os dicionários consolidados do repositório *cartaproale* no GitHub para alta performance na tradução de chaves técnicas:
 
         **1. CBO-2002 (Classificação Brasileira de Ocupações):**
-        * Realiza o mapeamento oficial cruzando a coluna original do DATASUS com o arquivo `cbo.csv` hospedado remotamente.
+        * Realiza o mapeamento exato das profissões (coluna `OCUP` ou similar) através da tabela oficial. Se houver falha, o sistema aciona uma contingência híbrida lendo os subgrupos prioritários.
 
-        **2. CID-10 (Classificação Internacional de Doenças):**
-        * Extrai o significado clínico exato dos códigos presentes nas Autorizações de Internação Hospitalar (SIH) e Declarações de Óbito (SIM) via leitura paralela do `cid10.csv`.
+        **2. CID-10 (Doenças):**
+        * Extrai o significado clínico exato dos códigos presentes nas colunas `CAUSABAS` (SIM) ou `DIAG_PRINC` (SIH).
+
+        **3. SIGTAP (Procedimentos SUS):**
+        * Exclusivo para as colunas do SIH (como `PROC_REA` e `PROC_SOLIC`), cruzando o código do SUS com a descrição de procedimentos, desde cirurgias complexas até consultas ambulatoriais.
+        """)
+
+    st.markdown("---")
+    st.header("2. ⚠️ Notas Técnicas e Limitações do DATASUS")
+    st.write("É fundamental compreender como o fluxo de dados do Ministério da Saúde funciona para evitar erros de análise:")
+
+    with st.expander("⏳ Atraso de Digitação e Consolidação (Lag)"):
+        st.markdown("""
+        Os dados de saúde pública no Brasil sofrem um atraso natural entre a ocorrência e a disponibilidade no sistema:
+        * **SIH (Internações):** É o sistema mais ágil (focado em faturamento). Atraso médio de **2 a 3 meses**.
+        * **SINAN (Agravos):** Varia por doença. Epidemias são rápidas, mas agravos crônicos podem levar até **6 meses** para chegar ao servidor federal.
+        * **SIM e SINASC (Óbitos e Nascimentos):** São os mais lentos devido à burocracia de cartórios e validações. Dados do ano corrente são sempre "Preliminares". A base consolidada pode levar até **2 anos** para ser fechada.
+        """)
+
+    with st.expander("🛑 Limitações Recentes do SINASC (A partir de 2021)"):
+        st.markdown("""
+        * **O que acontece:** O Ministério da Saúde reestruturou a forma de armazenar os dados de Nascidos Vivos no servidor FTP a partir de 2021 (devido a mudanças de formulário e LGPD).
+        * **Impacto na Extração:** A ferramenta PySUS pode não conseguir localizar as pastas recentes automaticamente no servidor raiz antigo.
+        * **Solução Alternativa:** Para dados de 2021 em diante, caso a extração retorne vazia, recomenda-se o download manual do `.csv` diretamente no **Portal de Dados Abertos do Governo Federal**.
         """)
         
     st.markdown("---")
-    st.header("2. Como citar os dados (Padrão ABNT)")
-    st.info("Sempre que utilizar dados extraídos deste sistema em relatórios, TCCs ou artigos científicos, você deve referenciar a fonte primária governamental.")
+    st.header("3. Como citar os dados (Padrão ABNT)")
+    st.info("Sempre que utilizar dados extraídos deste sistema em relatórios, TCCs ou artigos científicos, referencie a fonte primária governamental.")
     
     st.markdown("**Para dados do Ministério da Saúde (SIM, SINASC, SIH, SINAN, CNES):**")
     st.code("BRASIL. Ministério da Saúde. Departamento de Informática do SUS – DATASUS. Microdados de Saúde. Brasília, DF. Disponível em: <http://datasus.saude.gov.br/>. Acesso em: [Data de hoje].", language="text")
 
-    st.markdown("**Para dados de Vulnerabilidade Social (VIS DATA 3 / CadÚnico):**")
-    st.code("BRASIL. Ministério da Cidadania. Matriz de Informação Social (VIS DATA 3). Secretaria de Avaliação e Gestão da Informação. Brasília, DF. Disponível em: <https://aplicacoes.cidadania.gov.br/>. Acesso em: [Data de hoje].", language="text")
-
-    st.markdown("**Para utilizar a API de extração Python (PySUS):**")
+    st.markdown("**Para utilizar as rotinas de extração em Python (PySUS):**")
     st.code("ROCHA, F. A. C. et al. PySUS: ferramenta em linguagem Python para extração e tabulação de dados em saúde. Rio de Janeiro, RJ. Disponível em: <https://github.com/AlertaDengue/PySUS>. Acesso em: [Data de hoje].", language="text")
