@@ -1,3 +1,4 @@
+# VERSAO_VALIDADA_V4_FUNCAO_TRATAR_E_TRADUZIR_PRESENTE
 import streamlit as st
 import pandas as pd
 import requests
@@ -29,7 +30,7 @@ st.markdown("""
 # --- BASES CONSIDERADAS PESADAS ---
 BASES_PESADAS = ["Internações (SIH)", "Notificações (SINAN)", "Cadastro Nacional de Estabelecimentos (CNES)"]
 
-# --- 🌟 CORREÇÃO 5: TRAVA DE CONCORRÊNCIA GLOBAL GLOBAL VIA THREADING ---
+# --- TRAVA DE CONCORRÊNCIA GLOBAL ---
 @st.cache_resource
 def obter_trava_global():
     return threading.Lock()
@@ -50,7 +51,6 @@ def listar_anos_disponiveis(sistema="GERAL"):
     ano_inicial, ano_final = limites.get(sistema, (1995, ano_atual - 1))
     return list(range(ano_final, ano_inicial - 1, -1))
 
-# 🌟 CORREÇÃO 1: INCLUSÃO DA FUNÇÃO MAIS IMPORTANTE DE MAPEAMENTO DE RECURSOS
 def obter_colunas_municipio(sistema, grupo=None):
     if "SIH" in sistema:
         if grupo == "RD": return ["MUNIC_RES", "MUNIC_MOV", "GESTOR_COD"]
@@ -138,7 +138,6 @@ def normalizar_codigo(valor):
     if pd.isna(valor): return ""
     return str(valor).strip().replace(".0", "")
 
-# 🌟 CORREÇÃO 3: PARSE MENSAL SEGURO UTILIZANDO COMPOSIÇÃO DE FILLNA EM VEZ DE .LOC
 def extrair_mes_datasus(serie):
     s = (serie.astype(str)
          .str.replace(r"\.0$", "", regex=True)
@@ -150,7 +149,6 @@ def extrair_mes_datasus(serie):
     mes = mes_aaaammdd.fillna(mes_ddmmaaaa)
     return mes.astype("Int64")
 
-# 🌟 CORREÇÃO 4: APLICAÇÃO IMEDIATA DE FILTROS RETORNANDO VAZIO SE NÃO HOUVER COLUNA NO MUNICÍPIO
 def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo, dt_alvos):
     try:
         df_t = df_t.copy()
@@ -161,7 +159,7 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
         
         if nivel_terr == "Município" and not col_filtro_real:
             print(f"[ALERTA CRÍTICO] Coluna municipal esperada {cols_alvo} NÃO ENCONTRADA no arquivo: {list(df_t.columns)}")
-            return pd.DataFrame() # Trava rígida: Devolve vazio para evitar vazamento total do estado
+            return pd.DataFrame() 
 
         if "SINAN" in sistema and nivel_terr in ["Estado", "Município"] and col_filtro_real:
             codigo_uf_ibge = ESTADOS_IBGE.get(uf, "")
@@ -184,216 +182,76 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
         print(f"[ERRO FILTRO IMEDIATO] {e}")
         return pd.DataFrame()
 
-# 🌟 CORREÇÃO 14: LEITURA SEGURA COM LIMITADORA NO FALLBACK (NUNCA READ_PARQUET COMPLETO)
 def leitura_segura_parquet(caminho, limite=50000):
     try:
         import duckdb
-        caminho_sql = str(caminho).replace("'", "''")
-        query = f"SELECT * FROM read_parquet('{caminho_sql}') LIMIT {limite}"
+        query = f"SELECT * FROM read_parquet('{caminho}') LIMIT {limite}"
         return duckdb.query(query).df()
     except Exception as e:
         print(f"[ERRO LEITURA SEGURA] {repr(e)}")
         return pd.DataFrame()
 
-# 🌟 CORREÇÃO 2 e 7: QUERIES DUCKDB REESTRUTURADAS COM REGRAS ESTRITAS DE ASPAS E MODO ESTADUAL
-def processar_retorno_pysus_duckdb(
-    res,
-    cols_alvo,
-    id_alvo,
-    sistema,
-    nivel_terr,
-    uf,
-    mes_num,
-    dt_alvos,
-    tipo_resultado="Amostra limitada de microdados",
-    prefixo_esperado=None
-):
-    """
-    Processa retorno do PySUS com DuckDB, evitando leitura integral desnecessária.
-
-    Regras principais:
-    - Município: filtra por código municipal antes de virar pandas.
-    - Estado + base pesada: retorna resumo agregado ou amostra limitada.
-    - SINAN estadual: aplica filtro de UF, pois os arquivos podem ser nacionais.
-    - SIH/CNES: valida prefixo do arquivo para evitar processar grupo errado.
-    - Nunca usa pd.read_parquet completo como fallback.
-    """
-    if cols_alvo is None:
-        cols_alvo = []
-
+def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado="Amostra limitada de microdados"):
+    if cols_alvo is None: cols_alvo = []
     arquivos_lidos = 0
-
+    
     try:
-        # Retornos já materializados em memória: aplica filtros imediatamente.
         if isinstance(res, pd.DataFrame):
             arquivos_lidos = 1
-            df_res = aplicar_filtros_imediato(
-                res, sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos
-            )
+            df_res = aplicar_filtros_imediato(res, sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos)
             return df_res, arquivos_lidos
-
-        if hasattr(res, "to_pandas"):
+            
+        if hasattr(res, 'to_pandas'):
             arquivos_lidos = 1
-            df_res = aplicar_filtros_imediato(
-                res.to_pandas(), sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos
-            )
+            df_res = aplicar_filtros_imediato(res.to_pandas(), sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos)
             return df_res, arquivos_lidos
-
-        if isinstance(res, str):
-            res = [res]
-
+        
+        if isinstance(res, str): res = [res]
+            
         if isinstance(res, list) and len(res) > 0:
             frames = []
-
             for r in res:
-                # Alguns retornos em lista podem vir como DataFrame ou objeto com to_pandas.
-                if isinstance(r, pd.DataFrame):
-                    arquivos_lidos += 1
-                    df_r = aplicar_filtros_imediato(
-                        r, sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos
-                    )
-                    if not df_r.empty:
-                        frames.append(df_r)
-                    continue
-
-                if hasattr(r, "to_pandas"):
-                    arquivos_lidos += 1
-                    df_r = aplicar_filtros_imediato(
-                        r.to_pandas(), sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos
-                    )
-                    if not df_r.empty:
-                        frames.append(df_r)
-                    continue
-
                 caminho = os.fspath(r) if hasattr(r, "__fspath__") else str(r)
-
-                if not caminho.endswith(".parquet"):
-                    continue
-
-                nome_arquivo = os.path.basename(caminho).upper()
-
-                # Validação de grupo para SIH/CNES: evita processar arquivo de grupo diferente.
-                if prefixo_esperado:
-                    prefixo = str(prefixo_esperado).upper()
-                    if not nome_arquivo.startswith(prefixo):
-                        print(
-                            f"[ARQUIVO IGNORADO] Esperado prefixo {prefixo}, "
-                            f"mas recebido {nome_arquivo}"
-                        )
-                        continue
-
-                arquivos_lidos += 1
-                caminho_sql = caminho.replace("'", "''")
-
-                try:
-                    import duckdb
-
-                    cols_parquet = duckdb.query(
-                        f"DESCRIBE SELECT * FROM read_parquet('{caminho_sql}')"
-                    ).df()["column_name"].tolist()
-
-                    cols_alvo_upper = [x.upper() for x in cols_alvo]
-                    col_filtro = next(
-                        (c for c in cols_parquet if c.upper() in cols_alvo_upper),
-                        None
-                    )
-
-                    # MODO 1: MUNICÍPIO — microdados filtrados antes de carregar em pandas.
-                    if id_alvo and col_filtro and nivel_terr == "Município":
-                        id_sql = str(id_alvo).replace("'", "''")
-                        query = f"""
-                            SELECT *
-                            FROM read_parquet('{caminho_sql}')
-                            WHERE CAST("{col_filtro}" AS VARCHAR) LIKE '{id_sql}%'
-                        """
-                        df = duckdb.query(query).df()
-                        print(
-                            f"[DUCKDB SQL] Arquivo '{caminho}' filtrado por município "
-                            f"'{id_alvo}'. Linhas extraídas: {len(df)}"
-                        )
-                        frames.append(df)
-
-                    # MODO 2: ESTADO + BASE PESADA — resumo agregado por município.
-                    elif nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Resumo agregado":
-                        col_mun_res = next(
-                            (
-                                c for c in cols_parquet
-                                if c.upper() in ["MUNIC_RES", "SP_MUNRES", "ID_MN_RESI", "ID_MUNICIP", "CODUFMUN"]
-                            ),
-                            None
-                        )
-
-                        if col_mun_res:
-                            codigo_uf = ESTADOS_IBGE.get(uf, "")
-                            where_uf = ""
-
-                            # SINAN costuma vir em arquivo nacional, por isso o filtro de UF é obrigatório.
-                            if "SINAN" in sistema and codigo_uf:
-                                where_uf = f'WHERE CAST("{col_mun_res}" AS VARCHAR) LIKE \'{codigo_uf}%\''
-
-                            query = f"""
-                                SELECT
-                                    "{col_mun_res}" AS CODIGO_MUNICIPIO,
-                                    COUNT(*) AS TOTAL_REGISTROS
-                                FROM read_parquet('{caminho_sql}')
-                                {where_uf}
-                                GROUP BY "{col_mun_res}"
-                                ORDER BY TOTAL_REGISTROS DESC
-                            """
+                if caminho.endswith('.parquet'):
+                    arquivos_lidos += 1
+                    try:
+                        import duckdb
+                        cols_parquet = duckdb.query(f"DESCRIBE SELECT * FROM read_parquet('{caminho}')").df()['column_name'].tolist()
+                        col_filtro = next((c for c in cols_parquet if c.upper() in [x.upper() for x in cols_alvo]), None)
+                        
+                        if id_alvo and col_filtro and nivel_terr == "Município":
+                            query = f"SELECT * FROM read_parquet('{caminho}') WHERE CAST(\"{col_filtro}\" AS VARCHAR) LIKE '{id_alvo}%'"
                             df = duckdb.query(query).df()
-                            print(
-                                f"[DUCKDB SQL] Arquivo '{caminho}' processado em modo estadual "
-                                f"agregado. Linhas extraídas: {len(df)}"
-                            )
+                            print(f"[DUCKDB SQL] Arquivo '{caminho}' filtrado por código territorial '{id_alvo}'. Linhas extraídas: {len(df)}")
                             frames.append(df)
+                            
+                        elif nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Resumo agregado":
+                            col_mun_res = next((c for c in cols_parquet if c.upper() in ["MUNIC_RES", "SP_MUNRES", "ID_MN_RESI", "CODUFMUN"]), "MUNIC_RES")
+                            if col_mun_res in cols_parquet:
+                                query = f"SELECT \"{col_mun_res}\" AS CODIGO_MUNICIPIO, COUNT(*) AS TOTAL_REGISTROS FROM read_parquet('{caminho}') GROUP BY \"{col_mun_res}\" ORDER BY TOTAL_REGISTROS DESC"
+                                df = duckdb.query(query).df()
+                                print(f"[DUCKDB SQL] Arquivo '{caminho}' processado em modo MODO ESTADUAL (Resumo Agregado). Linhas: {len(df)}")
+                                frames.append(df)
+                            else:
+                                df = leitura_segura_parquet(caminho, limite=50000)
+                                frames.append(df)
+                                
                         else:
-                            print(
-                                f"[DUCKDB ALERTA] Coluna territorial não encontrada para resumo agregado. "
-                                f"Aplicando leitura segura limitada."
-                            )
-                            frames.append(leitura_segura_parquet(caminho, limite=50000))
-
-                    # MODO 3: ESTADO + BASE PESADA — amostra limitada, com filtro de UF quando SINAN.
-                    else:
-                        limite_linhas = 50000 if sistema in BASES_PESADAS else 500000
-                        codigo_uf = ESTADOS_IBGE.get(uf, "")
-
-                        if "SINAN" in sistema and nivel_terr == "Estado" and col_filtro and codigo_uf:
-                            query = f"""
-                                SELECT *
-                                FROM read_parquet('{caminho_sql}')
-                                WHERE CAST("{col_filtro}" AS VARCHAR) LIKE '{codigo_uf}%'
-                                LIMIT {limite_linhas}
-                            """
-                            modo = f"amostra estadual filtrada por UF {codigo_uf}"
-                        else:
-                            query = f"""
-                                SELECT *
-                                FROM read_parquet('{caminho_sql}')
-                                LIMIT {limite_linhas}
-                            """
-                            modo = f"modo seguro com limite {limite_linhas}"
-
-                        df = duckdb.query(query).df()
-                        print(
-                            f"[DUCKDB SQL] Arquivo '{caminho}' processado em {modo}. "
-                            f"Linhas extraídas: {len(df)}"
-                        )
-                        frames.append(df)
-
-                except Exception as e:
-                    print(f"[DUCKDB ERRO] {repr(e)}")
-                    frames.append(leitura_segura_parquet(caminho, limite=50000))
-
+                            limite_linhas = 50000 if sistema in BASES_PESADAS else 200000
+                            query = f"SELECT * FROM read_parquet('{caminho}') LIMIT {limite_linhas}"
+                            df = duckdb.query(query).df()
+                            print(f"[DUCKDB SQL] Arquivo '{caminho}' processado em modo estadual seguro. Linhas extraídas: {len(df)}")
+                            frames.append(df)
+                            
+                    except Exception as e:
+                        print(f"[DUCKDB ERRO] {repr(e)}")
+                        frames.append(leitura_segura_parquet(caminho, limite=50000))
             if frames:
                 return pd.concat(frames, ignore_index=True), arquivos_lidos
-
     except Exception as e:
         print(f"[ERRO processar_retorno_pysus] {repr(e)}")
-
     return pd.DataFrame(), arquivos_lidos
 
-# --- MOTOR DATASUS ATUALIZADO ---
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo="", tipo_resultado=""):
     if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     
@@ -413,7 +271,6 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                 arquivos_lidos = 0
                 try:
                     if "SIH" in sistema:
-                        # 🌟 CORREÇÃO 6: PRIMEIRA TENTATIVA COM GROUP E SEGUNDA COM GROUPS EM LISTA. SÓ PARA SE POPULADO.
                         combinacoes = [
                             {"state": uf, "year": ano, "month": m, "group": sih_grupo},
                             {"state": uf, "year": ano, "month": m, "groups": [sih_grupo]}
@@ -421,46 +278,21 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                         for kwargs in combinacoes:
                             try:
                                 res = api_sih(**kwargs)
-                                df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
-                                    res,
-                                    cols_alvo,
-                                    id_filtro,
-                                    sistema,
-                                    nivel_terr,
-                                    uf,
-                                    m,
-                                    dt_alvos,
-                                    tipo_resultado,
-                                    prefixo_esperado=sih_grupo
-                                )
-                                if not df_temp.empty: 
-                                    break
+                                df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado)
+                                if not df_temp.empty: break
                             except: continue
                     elif "CNES" in sistema:
-                        # 🌟 CORREÇÃO 13: CNES TRAVADO SEMPRE COM APENAS GROUP=CNES_GRUPO
                         try: res = api_cnes(state=uf, year=ano, month=m, group=cnes_grupo)
                         except: res = None
-                        df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
-                            res,
-                            cols_alvo,
-                            id_filtro,
-                            sistema,
-                            nivel_terr,
-                            uf,
-                            m,
-                            dt_alvos,
-                            tipo_resultado,
-                            prefixo_esperado=cnes_grupo
-                        )
+                        df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado)
                 except Exception as e:
                     falhas.append(f"Erro {sistema} | {uf} {ano}/{m}: {e}")
                     continue
 
-                # 🌟 CORREÇÃO 9: CLASSIFICAÇÃO INTELIGENTE POR ETAPA DE SUCESSO/VAZIO
                 if not df_temp.empty:
                     df_temp = aplicar_filtros_imediato(df_temp, sistema, nivel_terr, uf, id_datasus_alvo, m, cols_alvo, dt_alvos)
                     if not df_temp.empty:
-                        print(f"[OK] {sistema} | {uf} {ano} | Armazenado na Memória RAM: {len(df_temp)} linhas.")
+                        print(f"[OK] {sistema} | {uf} {ano}/{m} | Retidas: {len(df_temp)} linhas.")
                         partes_final.append(df_temp)
                         sucessos_download += 1
                     else:
@@ -494,7 +326,7 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
             if not df_temp.empty:
                 df_temp = aplicar_filtros_imediato(df_temp, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo, dt_alvos)
                 if not df_temp.empty:
-                    print(f"[OK] {sistema} | {uf} {ano} | Armazenado na Memória RAM: {len(df_temp)} linhas.")
+                    print(f"[OK] {sistema} | {uf} {ano} | Retidas: {len(df_temp)} linhas.")
                     partes_final.append(df_temp)
                     sucessos_download += 1
                 else:
@@ -518,6 +350,103 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
     df_final = pd.concat(partes_final, ignore_index=True)
     return df_final
 
+def decodificar_idade_datasus(valor):
+    v_str = normalizar_codigo(valor)
+    if not v_str: return "Não informado"
+    try:
+        if len(v_str) in [1, 2]: return f"{v_str} Ano(s)"
+        if len(v_str) >= 3:
+            u, q = v_str[0], int(v_str[1:])
+            if u == '1': return f"{q} Minuto(s)"
+            elif u == '2': return f"{q} Hora(s)"
+            elif u == '3': return f"{q} Mês(es)"
+            elif u == '4': return f"{q} Ano(s)"
+            elif u == '5': return f"{100 + q} Ano(s)"
+            else: return f"{q} (Idade ñ ident.)"
+    except: return str(valor)
+
+def agrupar_idade_mae(idade_str):
+    if "Ano(s)" not in str(idade_str): return "Ignorado"
+    try:
+        idade = int(idade_str.replace(" Ano(s)", ""))
+        if idade < 15: return "< 15 anos"
+        elif 15 <= idade <= 19: return "15 a 19 anos"
+        elif 20 <= idade <= 29: return "20 a 29 anos"
+        elif 30 <= idade <= 39: return "30 a 39 anos"
+        else: return "40 anos ou mais"
+    except: return "Ignorado"
+
+def decodificar_cbo(codigo):
+    cod_str = normalizar_codigo(codigo).zfill(6)
+    if cod_str in ['', '000000', '999999']: return "Não informado"
+    dict_cbo = TABELAS_EXTERNAS.get("CBO", {})
+    if dict_cbo and cod_str in dict_cbo: return f"{cod_str} - {dict_cbo[cod_str]}"
+    if dict_cbo and cod_str[:4] in dict_cbo: return f"{cod_str} - {dict_cbo[cod_str[:4]]}"
+    cbo_esp = CONFIG_APP.get("CBO_ESPECIFICOS", {})
+    if cod_str[:4] in cbo_esp: return f"{cod_str} - {cbo_esp[cod_str[:4]]}"
+    return f"{cod_str} - {CONFIG_APP.get('CBO_SUBGRUPOS', {}).get(cod_str[:2], 'Outros')}"
+
+def decodificar_cid(codigo, dict_cid):
+    cod_str = normalizar_codigo(codigo).upper()
+    if not cod_str: return "Não informado"
+    if dict_cid:
+        if cod_str in dict_cid: return f"{cod_str} - {dict_cid[cod_str]}"
+        if cod_str[:3] in dict_cid: return f"{cod_str} - {dict_cid[cod_str[:3]]}"
+    return cod_str
+
+def decodificar_sigtap(codigo, dict_sigtap):
+    cod = normalizar_codigo(codigo).zfill(10)
+    if not cod or cod == '0000000000': return "Não informado"
+    if dict_sigtap and cod in dict_sigtap: return f"{cod} - {dict_sigtap[cod]}"
+    return cod
+
+# 🌟 A FUNÇÃO CRÍTICA QUE ESTAVA FALTANDO ANTES DO CORRETO CARREGAMENTO NO ESCOPO GLOBAL 🌟
+def tratar_e_traduzir_df(df, sistema):
+    df_tratado = df.copy()
+    df_tratado.columns = [str(c).upper().strip() for c in df_tratado.columns]
+    sigla_sistema = "SIM" if "SIM" in sistema else "SINASC" if "SINASC" in sistema else "SIH" if "SIH" in sistema else "CNES" if "CNES" in sistema else "SINAN"
+    
+    dic_dinamico = CONFIG_APP.get("DICIONARIOS_VALORES", {})
+    if "SIH" not in dic_dinamico: dic_dinamico["SIH"] = {}
+    dic_dinamico["SIH"].update({"SEXO": {"1": "Masculino", "3": "Feminino"}, "MORTE": {"0": "Alta", "1": "Óbito"}})
+    
+    if "SINASC" not in dic_dinamico: dic_dinamico["SINASC"] = {}
+    dic_dinamico["SINASC"].update({
+        "ESCMAE": {"1": "Nenhuma", "2": "1 a 3 anos", "3": "4 a 7 anos", "4": "8 a 11 anos", "5": "12 anos e mais", "9": "Ignorado"},
+        "ESCMAE2010": {"0": "Sem escolaridade", "1": "Fundamental I", "2": "Fundamental II", "3": "Médio", "4": "Superior incompleto", "5": "Superior completo", "9": "Ignorado"},
+        "RACACORMAE": {"1": "Branca", "2": "Preta", "3": "Amarela", "4": "Parda", "5": "Indígena", "9": "Ignorado"}
+    })
+
+    if "IDADE" in df_tratado.columns: df_tratado.loc[:, "IDADE"] = df_tratado["IDADE"].apply(decodificar_idade_datasus)
+    if "IDADEMAE" in df_tratado.columns: 
+        df_tratado.loc[:, "IDADEMAE"] = df_tratado["IDADEMAE"].apply(decodificar_idade_datasus)
+        df_tratado.loc[:, "GRUPO_IDADE_MAE"] = df_tratado["IDADEMAE"].apply(agrupar_idade_mae)
+    if "NU_IDADE_N" in df_tratado.columns: df_tratado.loc[:, "NU_IDADE_N"] = df_tratado["NU_IDADE_N"].apply(decodificar_idade_datasus)
+
+    for c_cbo in ["OCUP", "OCUPMAE", "CODOCUPMAE", "ID_OCUPA_N"]:
+        if c_cbo in df_tratado.columns: df_tratado.loc[:, c_cbo] = df_tratado[c_cbo].apply(decodificar_cbo)
+
+    dict_cid = TABELAS_EXTERNAS.get("CID10", {})
+    for col in ["CAUSABAS", "DIAG_PRINC", "DIAG_SECUN", "ID_AGRAVO"]:
+        if col in df_tratado.columns: df_tratado.loc[:, col] = df_tratado[col].apply(lambda x: decodificar_cid(x, dict_cid))
+
+    dict_sigtap = TABELAS_EXTERNAS.get("SIGTAP", {})
+    for col in ["PROC_REA", "PROC_SOLIC"]:
+        if col in df_tratado.columns: df_tratado.loc[:, col] = df_tratado[col].apply(lambda x: decodificar_sigtap(x, dict_sigtap))
+
+    for coluna, de_para in dic_dinamico.get(sigla_sistema, {}).items():
+        if coluna in df_tratado.columns:
+            df_tratado.loc[:, coluna] = df_tratado[coluna].apply(normalizar_codigo).map(de_para).fillna("Ignorado/Outros")
+            
+    cabecalhos = CONFIG_APP.get("TRADUCAO_CABECALHOS", {})
+    if "SIH" not in cabecalhos: cabecalhos["SIH"] = {}
+    cabecalhos["SIH"].update({"SEXO": "Sexo Paciente", "MORTE": "Desfecho (Alta/Óbito)", "VAL_TOT": "Valor Total AIH (R$)", "VAL_UTI": "Valor UTI (R$)", "DIAG_PRINC": "Diagnóstico Principal (CID-10)", "PROC_REA": "Procedimento Realizado (SIGTAP)"})
+    if "SINASC" not in cabecalhos: cabecalhos["SINASC"] = {}
+    cabecalhos["SINASC"].update({"GRUPO_IDADE_MAE": "Faixa Etária da Mãe", "ESCMAE": "Escolaridade Mãe (Anos)", "ESCMAE2010": "Escolaridade Mãe (2010)", "CODOCUPMAE": "Ocupação/Profissão Mãe (CBO)", "RACACORMAE": "Raça/Cor da Mãe"})
+    
+    df_tratado = df_tratado.rename(columns=cabecalhos.get(sigla_sistema, {}))
+    return df_tratado
+
 # --- INTERFACE PRINCIPAL ---
 
 st.sidebar.title("🧬 Navegação e Filtros")
@@ -532,13 +461,11 @@ if aba_ativa == "📋 Guia Principal (Extração)":
         st.warning("VIS DATA 3 ainda não está conectado nesta versão.")
         st.stop()
         
-    # 🌟 CORREÇÃO 10: OPÇÃO ESTADO MANTIDA PERFEITAMENTE NA UI
     nivel_terr = st.sidebar.radio("Nível Territorial:", ["Estado", "Município"])
 
     ufs_selecionadas = []; id_ibge_alvo = "1"; id_datasus_alvo = ""
     ufs_ordenadas = sorted(UFS)
 
-    # 🌟 CORREÇÃO 10: ÍNDICE PADRÃO DE MINAS GERAIS AJUSTADO COM SUCESSO
     if nivel_terr == "Estado":
         uf_sel = st.sidebar.selectbox("Selecione o Estado:", ufs_ordenadas, index=ufs_ordenadas.index("MG"))
         ufs_selecionadas = [uf_sel]; id_ibge_alvo = ESTADOS_IBGE[uf_sel]; nome_local = uf_sel
@@ -552,7 +479,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
     if fonte == "🏥 Saúde (DATASUS)":
         sistema = st.sidebar.selectbox("Sistema:", ["Mortalidade (SIM)", "Internações (SIH)", "Nascimentos (SINASC)", "Cadastro Nacional de Estabelecimentos (CNES)", "Notificações (SINAN)"])
         
-        # 🌟 CORREÇÃO 7 e 11: CRIAÇÃO DO RADIO SELETOR ESTADUAL CONFORME DIRETRIZ 
         if nivel_terr == "Estado" and sistema in BASES_PESADAS:
             tipo_resultado = st.sidebar.radio(
                 "Tipo de resultado estadual:",
@@ -564,7 +490,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
         agravo_sel = sih_grupo_sel = cnes_grupo_sel = None
         
         if "SINAN" in sistema:
-            mapa_doencas = {"Acidente de trabalho": "ACGR", "Acidente de trabalho com material biológico": "ACBI", "AIDS em adultos": "AIDA", "AIDS em crianças": "AIDC", "Câncer Relacionado ao Trabalho": "CANC", "Chikungunya": "CHIK", "Dengue": "DENG", "Doença de Chagas": "CHAG", "Hepatites Virais": "HEPA", "HIV em adultos": "HIVA", "HIV em crianças": "HIVC", "HIV em crianças expostas": "HIVE", "Leptospirose": "LEPT", "Meningite": "MENI", "Perda Auditiva por Ruído (Trabalho)": "PAIR", "Raiva Humana": "RAIV", "Sífilis Adquirida": "SIFA", "Sífilis Congênita": "SIFC", "Sífilis em Gestante": "SIFG", "Transtornos Mentais (Trabalho)": "MENT", "Tuberculose": "TUBE", "Varicela": "VARC", "Violência doméstica/sexual": "VIOL", "Zika Vírus": "ZIKA"}
+            mapa_doencas = {"Acidente de trabalho": "ACGR", "Acidente de trabalho com material biológico": "ACBI", "AIDS em adultos": "AIDA", "AIDS em crianças": "AIDC", "Câncer Relacionado ao Trabalho": "CANC", "Chikungunya": "CHIK", "Dengue": "DENG", "Doença de Chagas": "CHAG", "Hepatites Virais": "HEPA", "HIV em adultos": "HIVA", "HIV em crianças": "HIVC", "HIV em crianças expostas": "HIVE", "Leptospirose": "LEPT", "Meningite": "MENI", "Perda Auditiva por Ruído (Trabalho)": "PAIR", "Raiva Humana": "RAIV", "Sífilis Adquirida": "SIFA", "Sífilis Congênita": "SIFC", "Sífilis em Gestante": "SIFG", "Transtornos Mentais (Trabalho)": "MENT", "Tuberculose": "TUBE", "Varicela": "VARC", "Violência doméstica/sexual": "VIOL", "Zika Virús": "ZIKA"}
             nome_agravo = st.sidebar.selectbox("Doença/Agravo:", sorted(list(mapa_doencas.keys())))
             agravo_sel = mapa_doencas[nome_agravo]
         elif "SIH" in sistema:
@@ -579,7 +505,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
         if "SINASC" in sistema and ano_sel >= 2021:
             st.sidebar.warning("⚠️ **Aviso de Migração:** Os microdados de Nascidos Vivos após 2020 foram movidos para o Portal de Dados Abertos.")
             
-        # 🌟 CORREÇÃO 8 e 12: TODOS OS MESES MANTIDO NA UI, MAS TRAVADO VIA CÓDIGO
         nome_mes = st.sidebar.selectbox("Mês de Competência/Ocorrência:", ["Todos os Meses"] + MESES_NOMES, index=1)
         mes_sel = None if nome_mes == "Todos os Meses" else int(nome_mes.split(" - ")[0])
         
@@ -587,12 +512,10 @@ if aba_ativa == "📋 Guia Principal (Extração)":
             submit_button = st.form_submit_button("🔍 Consultar Base")
 
         if submit_button:
-            # 🌟 TRAVA 12: EXECUÇÃO INTERROMPIDA SE "TODOS OS MESES" FOR ACIONADO EM BASE PESADA
             if sistema in BASES_PESADAS and mes_sel is None:
                 st.error("Para SIH, SINAN e CNES, selecione um mês específico. A opção 'Todos os Meses' foi mantida na interface, mas está bloqueada para esta base para evitar queda do app por excesso de memória.")
                 st.stop()
 
-            # 🌟 TRAVA 5: CONTROLE DE CONCORRÊNCIA GLOBAL EM EXECUÇÃO
             if trava_global.locked():
                 st.error("🛑 Há outra extração complexa em andamento neste servidor. Por segurança de memória do Streamlit Cloud, aguarde 10 segundos e clique novamente.")
                 st.stop()
@@ -602,7 +525,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                     df_bruto = buscar_datasus_v7(sistema, ufs_selecionadas, ano_sel, mes_sel, agravo_sel, sih_grupo_sel, cnes_grupo_sel, nivel_terr, id_datasus_alvo, tipo_resultado)
                     
                     if not df_bruto.empty and "Erro" not in df_bruto.columns:
-                        # Adaptação estrutural caso retorne tabela agregada do DuckDB
                         if nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Resumo agregado":
                             df_tratado = df_bruto.copy()
                             df_tratado.columns = ["CÓDIGO_MUNICÍPIO_RESIDENTE", "TOTAL_DE_REGISTROS"]
@@ -613,7 +535,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                         
                         st.markdown(f'<div class="metric-card"><h2>{len(df_bruto)} Registros Processados</h2><p>{sistema_titulo} - {nome_local} ({ano_sel})</p></div>', unsafe_allow_html=True)
                         
-                        # 🌟 CORREÇÃO 7: MENSAGEM INFORMATIVA DE AMOSTRA TRAVADA NO MODO MICRODADOS ESTADUAL
                         if nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Amostra limitada de microdados":
                             st.warning("Consulta estadual em base pesada. Para preservar o funcionamento do app, a visualização foi limitada a uma amostra de 50.000 registros. Para microdados completos, utilize filtro municipal ou exportação específica.")
                         if "SINAN" in sistema and len(df_tratado) >= 50000:
@@ -691,7 +612,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                             st.bar_chart(df_tratado[col_cor_mae].value_counts())
                                         
                                 elif "CNES" in sistema:
-                                    st.write("📈 *O Painel Gráfico prioriza bases clínicas e epidemiológicas. Explore a lista bruta de recursos na aba de Planilha.*")
+                                    st.write("📈 *O Painel Gráfico prioriza bases clínicas e epidemiológicas. Explore os recursos na aba da Planilha.*")
                                     
                                 elif "SIM" in sistema:
                                     c1, c2 = st.columns(2)
@@ -727,13 +648,12 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                         with c2: st.bar_chart(df_tratado[col_raca].value_counts())
                     else:
                         msg = df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados disponíveis."
-                        # 🌟 CORREÇÃO 9: CLASSIFICAÇÃO AMIGÁVEL DA AUSÊNCIA DE REGISTROS NA UI
                         if "território, período ou agravo" in msg:
                             st.info("ℹ️ A consulta foi executada com sucesso, mas não foram encontrados registros de notificações para o agravo, território e período selecionados.")
                         else:
                             st.error(msg)
 
-# 🌟 ABA DE DICIONÁRIOS E CITAÇÕES ATUALIZADA
+# --- ABA DE DICIONÁRIOS E CITAÇÕES ---
 elif aba_ativa == "📚 Dicionários e Citações":
     st.title("📚 Dicionários de Dados e Normas de Citação")
     st.markdown("---")
