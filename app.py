@@ -72,7 +72,6 @@ def carregar_tabelas_complementares():
     if os.path.exists("tabela_cid10_codigo_descricao.csv"):
         try:
             df_cid = pd.read_csv("tabela_cid10_codigo_descricao.csv", sep=";", dtype=str, encoding='utf-8', on_bad_lines='skip')
-            # Tratamento robusto das colunas
             if {"codigo_datasus", "descricao"}.issubset(df_cid.columns):
                 df_cid["codigo_datasus"] = df_cid["codigo_datasus"].str.strip().str.upper()
                 df_cid["descricao"] = df_cid["descricao"].str.strip()
@@ -239,7 +238,7 @@ def tratar_e_traduzir_df(df, sistema):
     for col in ["PROC_REA", "PROC_SOLIC"]:
         if col in df_tratado.columns: df_tratado[col] = df_tratado[col].apply(lambda x: decodificar_sigtap(x, dict_sigtap))
 
-    # Aplicação de Dicionários com Normalização de Código (Resolve o bug do "1.0")
+    # Aplicação de Dicionários com Normalização de Código
     for coluna, de_para in dic_dinamico.get(sigla_sistema, {}).items():
         if coluna in df_tratado.columns:
             df_tratado[coluna] = df_tratado[coluna].apply(normalizar_codigo).map(de_para).fillna("Ignorado/Outros")
@@ -256,13 +255,43 @@ def tratar_e_traduzir_df(df, sistema):
 # --- MOTOR DATASUS SEGURO E BLINDADO ---
 
 def processar_retorno_pysus(res):
-    """Garante o retorno consistente de um DataFrame válido"""
-    if isinstance(res, pd.DataFrame): return res
-    if hasattr(res, 'to_pandas'): return res.to_pandas()
-    if isinstance(res, str) and res.endswith('.parquet'): return pd.read_parquet(res)
-    if isinstance(res, list) and len(res) > 0:
-        frames = [r.to_pandas() for r in res if hasattr(r, 'to_pandas')]
-        if frames: return pd.concat(frames, ignore_index=True)
+    """
+    CORREÇÃO DO BUG 'FALTA DE DADOS': 
+    Agora lê corretamente strings, DataFrames e, principalmente, Listas de Strings (Caminhos Parquet baixados pelo PySUS)
+    """
+    try:
+        if isinstance(res, pd.DataFrame): 
+            return res
+        if hasattr(res, 'to_pandas'): 
+            return res.to_pandas()
+        
+        # Se for um único caminho (string)
+        if isinstance(res, str):
+            if res.endswith('.parquet'): return pd.read_parquet(res)
+            if res.endswith('.csv'): return pd.read_csv(res)
+            try: return pd.read_parquet(res) # Tenta ler mesmo sem extensão
+            except: pass
+            
+        # 🌟 O SEGREDO DO BUG: Se for uma LISTA de caminhos de arquivos (Strings)
+        if isinstance(res, list) and len(res) > 0:
+            frames = []
+            for r in res:
+                if hasattr(r, 'to_pandas'): 
+                    frames.append(r.to_pandas())
+                elif isinstance(r, pd.DataFrame): 
+                    frames.append(r)
+                elif isinstance(r, str) and r.endswith('.parquet'): 
+                    frames.append(pd.read_parquet(r))
+                elif isinstance(r, str):
+                    try: frames.append(pd.read_parquet(r))
+                    except: pass
+            
+            if frames: 
+                return pd.concat(frames, ignore_index=True)
+                
+    except Exception as e:
+        print(f"Erro no processamento do arquivo: {e}")
+        
     return pd.DataFrame()
 
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Brasil", id_datasus_alvo=""):
@@ -555,13 +584,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                 else:
                     msg = df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados disponíveis."
                     st.error(msg)
-
-    st.markdown("""
-        <div class="footer-text">
-            <b>Fontes de Dados:</b> Ministério da Saúde (DATASUS) | IBGE<br>
-            <i>Sistema construído com arquitetura PySUS e Dicionários Desacoplados. Otimizado com Garbage Collector (Limpeza de RAM ativa).</i>
-        </div>
-    """, unsafe_allow_html=True)
 
 # 🌟 ABA DE DICIONÁRIOS E CITAÇÕES
 elif aba_ativa == "📚 Dicionários e Citações":
