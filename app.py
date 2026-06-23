@@ -1,4 +1,4 @@
-# VERSAO_VALIDADA_V5_SINAN_SEGMENTADO_POR_UF
+# VERSAO_VALIDADA_V5_FILTRO_PREFIXO_ESTRITO_PRESENTE
 import streamlit as st
 import pandas as pd
 import requests
@@ -191,7 +191,8 @@ def leitura_segura_parquet(caminho, limite=50000):
         print(f"[ERRO LEITURA SEGURA] {repr(e)}")
         return pd.DataFrame()
 
-def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado="Amostra limitada de microdados"):
+# --- 🌟 CORREÇÃO TÉCNICA 1 E 2: INCLUSÃO DE PREFIXO_ESPERADO E QUERIES CORRIGIDAS ---
+def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado="Amostra limitada de microdados", prefixo_esperado=None):
     if cols_alvo is None: cols_alvo = []
     arquivos_lidos = 0
     
@@ -213,6 +214,14 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
             for r in res:
                 caminho = os.fspath(r) if hasattr(r, "__fspath__") else str(r)
                 if caminho.endswith('.parquet'):
+                    # Validation of Prefix Estrito
+                    nome_arquivo = os.path.basename(caminho).upper()
+                    if prefixo_esperado:
+                        prefixo = str(prefixo_esperado).upper()
+                        if not nome_arquivo.startswith(prefixo):
+                            print(f"[ARQUIVO IGNORADO] Grupo selecionado={prefixo}. Arquivo recebido={nome_arquivo}. O arquivo foi ignorado para evitar resultado de grupo errado.")
+                            continue
+                            
                     arquivos_lidos += 1
                     try:
                         import duckdb
@@ -220,6 +229,7 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
                         col_filtro = next((c for c in cols_parquet if c.upper() in [x.upper() for x in cols_alvo]), None)
                         
                         if id_alvo and col_filtro and nivel_terr == "Município":
+                            # Queries reformatted according to requirements rules: single quotes for paths/literals, double quotes for columns
                             query = f"SELECT * FROM read_parquet('{caminho}') WHERE CAST(\"{col_filtro}\" AS VARCHAR) LIKE '{id_alvo}%'"
                             df = duckdb.query(query).df()
                             print(f"[DUCKDB SQL] Arquivo '{caminho}' filtrado por código territorial '{id_alvo}'. Linhas extraídas: {len(df)}")
@@ -252,6 +262,7 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
         print(f"[ERRO processar_retorno_pysus] {repr(e)}")
     return pd.DataFrame(), arquivos_lidos
 
+# --- MOTOR DATASUS ATUALIZADO ---
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo="", tipo_resultado=""):
     if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     
@@ -271,6 +282,7 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                 arquivos_lidos = 0
                 try:
                     if "SIH" in sistema:
+                        # 🌟 CORREÇÃO TÉCNICA 6: RASTREAMENTO SEQUENCIAL EXAUSTIVO SEM TRAVA PRECOCE POR ARQUIVOS_LIDOS
                         combinacoes = [
                             {"state": uf, "year": ano, "month": m, "group": sih_grupo},
                             {"state": uf, "year": ano, "month": m, "groups": [sih_grupo]}
@@ -278,13 +290,13 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                         for kwargs in combinacoes:
                             try:
                                 res = api_sih(**kwargs)
-                                df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado)
+                                df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado, prefixo_esperado=sih_grupo)
                                 if not df_temp.empty: break
                             except: continue
                     elif "CNES" in sistema:
                         try: res = api_cnes(state=uf, year=ano, month=m, group=cnes_grupo)
                         except: res = None
-                        df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado)
+                        df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado, prefixo_esperado=cnes_grupo)
                 except Exception as e:
                     falhas.append(f"Erro {sistema} | {uf} {ano}/{m}: {e}")
                     continue
@@ -316,7 +328,6 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                     res = api_sinasc(state=uf, year=ano)
                     df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo, id_filtro, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado)
                 elif "SINAN" in sistema:
-                    # 🌟 REVOLUÇÃO DO SINAN: Tenta baixar o arquivo segmentado por UF primeiro, evitando travar a Dengue!
                     try:
                         from pysus.online_data.SINAN import download as download_sinan
                         res = download_sinan(disease=agravo, years=[ano], states=[uf])
@@ -459,7 +470,7 @@ aba_ativa = st.sidebar.radio("Navegar para:", ["📋 Guia Principal (Extração)
 
 if aba_ativa == "📋 Guia Principal (Extração)":
 
-    st.markdown('<div class="header-sidra"><h1>Central de Inteligência Territorial</h1><p>DATASUS conectado | VIS DATA 3 em desenvolvimento</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="header-sidra"><h1>Central de Inteligência Territorial</h1><p>DATASUS conectado via DuckDB | SIDRA e VIS DATA 3 em desenvolvimento</p></div>', unsafe_allow_html=True)
 
     fonte = st.sidebar.radio("Base de Informação:", ["🏥 Saúde (DATASUS)", "🏠 Social (VIS DATA 3 - Indisponível)"])
     if "VIS DATA 3" in fonte:
@@ -477,7 +488,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
     elif nivel_terr == "Município":
         uf_sel = st.sidebar.selectbox("Filtrar Estado:", ufs_ordenadas, index=ufs_ordenadas.index("MG"))
         muns_estado = buscar_municipios_por_uf(uf_sel)
-        mun_nome = st.sidebar.selectbox("Selecione o Municipio:", sorted(muns_estado.keys()))
+        mun_nome = st.sidebar.selectbox("Selecione o Município:", sorted(muns_estado.keys()))
         dados_mun = muns_estado[mun_nome]
         ufs_selecionadas = [uf_sel]; id_ibge_alvo = dados_mun['id7']; id_datasus_alvo = dados_mun['id6']; nome_local = mun_nome
 
@@ -499,8 +510,19 @@ if aba_ativa == "📋 Guia Principal (Extração)":
             nome_agravo = st.sidebar.selectbox("Doença/Agravo:", sorted(list(mapa_doencas.keys())))
             agravo_sel = mapa_doencas[nome_agravo]
         elif "SIH" in sistema:
-            mapa_sih = {"RD - Registros de Internações (Padrão)": "RD", "SP - Serviços Profissionais": "SP", "ER - Emergência Referenciada": "ER", "CM - Cirurgias Ambulatoriais": "CM"}
+            # 🌟 CORREÇÃO TÉCNICA 3: MAPA SIH ATUALIZADO CONFORME NOMENCLATURA EXIGIDA
+            mapa_sih = {
+                "RD - Registros de Internações / AIH Reduzida (padrão)": "RD",
+                "SP - Serviços Profissionais (não representa nº de internações)": "SP",
+                "ER - Emergência Referenciada (experimental)": "ER",
+                "CM - Cirurgias Ambulatoriais (experimental)": "CM"
+            }
             sih_grupo_sel = mapa_sih[st.sidebar.selectbox("Grupo de Dados (SIH):", list(mapa_sih.keys()))]
+            if sih_grupo_sel != "RD":
+                st.sidebar.warning(
+                    "Este grupo do SIH não deve ser interpretado como número de internações. "
+                    "O app processará somente arquivos com o prefixo do grupo selecionado."
+                )
         elif "CNES" in sistema:
             mapa_cnes = {"ST - Estabelecimentos": "ST", "PF - Profissionais": "PF", "SR - Serviços": "SR", "HB - Habilitações": "HB", "IN - Incentivos": "IN", "EP - Estabelecimento por Procedimento": "EP", "EQ - Equipamentos": "EQ", "LT - Leitos": "LT", "DC - Dados Complementares": "DC"}
             cnes_grupo_sel = mapa_cnes[st.sidebar.selectbox("Grupo de Dados (CNES):", list(mapa_cnes.keys()))]
@@ -538,7 +560,12 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             df_tratado = tratar_e_traduzir_df(df_bruto, sistema)
                             sistema_titulo = f"SINAN ({nome_agravo})" if "SINAN" in sistema else f"SIH ({sih_grupo_sel})" if "SIH" in sistema else f"CNES ({cnes_grupo_sel})" if "CNES" in sistema else sistema.split(" (")[0]
                         
-                        st.markdown(f'<div class="metric-card"><h2>{len(df_bruto)} Registros Processados</h2><p>{sistema_titulo} - {nome_local} ({ano_sel})</p></div>', unsafe_allow_html=True)
+                        # 🌟 CORREÇÃO TÉCNICA 4: ATUALIZAÇÃO DO CARD DE RESULTADO COM RÓTULO DE PERÍODO TRATADO
+                        periodo_label = f"{mes_sel:02d}/{ano_sel}" if mes_sel else f"{ano_sel}"
+                        st.markdown(
+                            f'<div class="metric-card"><h2>{len(df_bruto)} Registros Processados</h2><p>{sistema_titulo} - {nome_local} ({periodo_label})</p></div>',
+                            unsafe_allow_html=True
+                        )
                         
                         if nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Amostra limitada de microdados":
                             st.warning("Consulta estadual em base pesada. Para preservar o funcionamento do app, a visualização foi limitada a uma amostra de 50.000 registros. Para microdados completos, utilize filtro municipal ou exportação específica.")
@@ -676,7 +703,7 @@ elif aba_ativa == "📚 Dicionários e Citações":
 
     with st.expander("🛏️ SIH (Sistema de Informações Hospitalares)"):
         st.markdown("""
-        * **Resumo:** Dados de internações hospitalares pelo SUS. A tabela do tipo RD (AIH Reduzica) contém o resumo clínico e financeiro da internação.
+        * **Resumo:** Dados de internações hospitalares pelo SUS. A tabela do tipo RD (AIH Reduzida) contém o resumo clínico e financeiro da internação.
         * **DIAG_PRINC / DIAG_SECUN:** Diagnósticos registrados em formato CID-10, passíveis de mapeamento automático.
         * **PROC_REA / PROC_SOLIC:** Procedimentos realizados e solicitados. Cruzados automaticamente com a tabela SIGTAP.
         * **CGC_HOSP:** Identificação do hospital que pode ser relacionada ao Cadastro Nacional de Estabelecimentos (CNES).
