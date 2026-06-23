@@ -188,78 +188,209 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
 def leitura_segura_parquet(caminho, limite=50000):
     try:
         import duckdb
-        query = f"SELECT * FROM read_parquet('{caminho}') LIMIT {limite}"
+        caminho_sql = str(caminho).replace("'", "''")
+        query = f"SELECT * FROM read_parquet('{caminho_sql}') LIMIT {limite}"
         return duckdb.query(query).df()
     except Exception as e:
         print(f"[ERRO LEITURA SEGURA] {repr(e)}")
         return pd.DataFrame()
 
 # 🌟 CORREÇÃO 2 e 7: QUERIES DUCKDB REESTRUTURADAS COM REGRAS ESTRITAS DE ASPAS E MODO ESTADUAL
-def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado="Amostra limitada de microdados"):
-    if cols_alvo is None: cols_alvo = []
+def processar_retorno_pysus_duckdb(
+    res,
+    cols_alvo,
+    id_alvo,
+    sistema,
+    nivel_terr,
+    uf,
+    mes_num,
+    dt_alvos,
+    tipo_resultado="Amostra limitada de microdados",
+    prefixo_esperado=None
+):
+    """
+    Processa retorno do PySUS com DuckDB, evitando leitura integral desnecessária.
+
+    Regras principais:
+    - Município: filtra por código municipal antes de virar pandas.
+    - Estado + base pesada: retorna resumo agregado ou amostra limitada.
+    - SINAN estadual: aplica filtro de UF, pois os arquivos podem ser nacionais.
+    - SIH/CNES: valida prefixo do arquivo para evitar processar grupo errado.
+    - Nunca usa pd.read_parquet completo como fallback.
+    """
+    if cols_alvo is None:
+        cols_alvo = []
+
     arquivos_lidos = 0
-    
+
     try:
+        # Retornos já materializados em memória: aplica filtros imediatamente.
         if isinstance(res, pd.DataFrame):
             arquivos_lidos = 1
-            df_res = aplicar_filtros_imediato(res, sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos)
+            df_res = aplicar_filtros_imediato(
+                res, sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos
+            )
             return df_res, arquivos_lidos
-            
-        if hasattr(res, 'to_pandas'):
+
+        if hasattr(res, "to_pandas"):
             arquivos_lidos = 1
-            df_res = aplicar_filtros_imediato(res.to_pandas(), sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos)
+            df_res = aplicar_filtros_imediato(
+                res.to_pandas(), sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos
+            )
             return df_res, arquivos_lidos
-        
-        if isinstance(res, str): res = [res]
-            
+
+        if isinstance(res, str):
+            res = [res]
+
         if isinstance(res, list) and len(res) > 0:
             frames = []
+
             for r in res:
-                caminho = os.fspath(r) if hasattr(r, "__fspath__") else str(r)
-                if caminho.endswith('.parquet'):
+                # Alguns retornos em lista podem vir como DataFrame ou objeto com to_pandas.
+                if isinstance(r, pd.DataFrame):
                     arquivos_lidos += 1
-                    try:
-                        import duckdb
-                        cols_parquet = duckdb.query(f"DESCRIBE SELECT * FROM read_parquet('{caminho}')").df()['column_name'].tolist()
-                        col_filtro = next((c for c in cols_parquet if c.upper() in [x.upper() for x in cols_alvo]), None)
-                        
-                        # MODO MUNICIPIO (Microdados Filtrados Cirurgicamente)
-                        if id_alvo and col_filtro and nivel_terr == "Município":
-                            query = f"SELECT * FROM read_parquet('{caminho}') WHERE CAST(\"{col_filtro}\" AS VARCHAR) LIKE '{id_alvo}%'"
+                    df_r = aplicar_filtros_imediato(
+                        r, sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos
+                    )
+                    if not df_r.empty:
+                        frames.append(df_r)
+                    continue
+
+                if hasattr(r, "to_pandas"):
+                    arquivos_lidos += 1
+                    df_r = aplicar_filtros_imediato(
+                        r.to_pandas(), sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos
+                    )
+                    if not df_r.empty:
+                        frames.append(df_r)
+                    continue
+
+                caminho = os.fspath(r) if hasattr(r, "__fspath__") else str(r)
+
+                if not caminho.endswith(".parquet"):
+                    continue
+
+                nome_arquivo = os.path.basename(caminho).upper()
+
+                # Validação de grupo para SIH/CNES: evita processar arquivo de grupo diferente.
+                if prefixo_esperado:
+                    prefixo = str(prefixo_esperado).upper()
+                    if not nome_arquivo.startswith(prefixo):
+                        print(
+                            f"[ARQUIVO IGNORADO] Esperado prefixo {prefixo}, "
+                            f"mas recebido {nome_arquivo}"
+                        )
+                        continue
+
+                arquivos_lidos += 1
+                caminho_sql = caminho.replace("'", "''")
+
+                try:
+                    import duckdb
+
+                    cols_parquet = duckdb.query(
+                        f"DESCRIBE SELECT * FROM read_parquet('{caminho_sql}')"
+                    ).df()["column_name"].tolist()
+
+                    cols_alvo_upper = [x.upper() for x in cols_alvo]
+                    col_filtro = next(
+                        (c for c in cols_parquet if c.upper() in cols_alvo_upper),
+                        None
+                    )
+
+                    # MODO 1: MUNICÍPIO — microdados filtrados antes de carregar em pandas.
+                    if id_alvo and col_filtro and nivel_terr == "Município":
+                        id_sql = str(id_alvo).replace("'", "''")
+                        query = f"""
+                            SELECT *
+                            FROM read_parquet('{caminho_sql}')
+                            WHERE CAST("{col_filtro}" AS VARCHAR) LIKE '{id_sql}%'
+                        """
+                        df = duckdb.query(query).df()
+                        print(
+                            f"[DUCKDB SQL] Arquivo '{caminho}' filtrado por município "
+                            f"'{id_alvo}'. Linhas extraídas: {len(df)}"
+                        )
+                        frames.append(df)
+
+                    # MODO 2: ESTADO + BASE PESADA — resumo agregado por município.
+                    elif nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Resumo agregado":
+                        col_mun_res = next(
+                            (
+                                c for c in cols_parquet
+                                if c.upper() in ["MUNIC_RES", "SP_MUNRES", "ID_MN_RESI", "ID_MUNICIP", "CODUFMUN"]
+                            ),
+                            None
+                        )
+
+                        if col_mun_res:
+                            codigo_uf = ESTADOS_IBGE.get(uf, "")
+                            where_uf = ""
+
+                            # SINAN costuma vir em arquivo nacional, por isso o filtro de UF é obrigatório.
+                            if "SINAN" in sistema and codigo_uf:
+                                where_uf = f'WHERE CAST("{col_mun_res}" AS VARCHAR) LIKE \'{codigo_uf}%\''
+
+                            query = f"""
+                                SELECT
+                                    "{col_mun_res}" AS CODIGO_MUNICIPIO,
+                                    COUNT(*) AS TOTAL_REGISTROS
+                                FROM read_parquet('{caminho_sql}')
+                                {where_uf}
+                                GROUP BY "{col_mun_res}"
+                                ORDER BY TOTAL_REGISTROS DESC
+                            """
                             df = duckdb.query(query).df()
-                            if id_alvo:
-                                print(f"[DUCKDB SQL] Arquivo '{caminho}' filtrado por código territorial '{id_alvo}'. Linhas extraídas: {len(df)}")
-                            else:
-                                print(f"[DUCKDB SQL] Arquivo '{caminho}' processado em modo estadual seguro. Linhas extraídas: {len(df)}")
+                            print(
+                                f"[DUCKDB SQL] Arquivo '{caminho}' processado em modo estadual "
+                                f"agregado. Linhas extraídas: {len(df)}"
+                            )
                             frames.append(df)
-                            
-                        # MODO ESTADO PESADO (Agrupamento em Tabela Resumo)
-                        elif nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Resumo agregado":
-                            col_mun_res = next((c for c in cols_parquet if c.upper() in ["MUNIC_RES", "SP_MUNRES", "ID_MN_RESI", "CODUFMUN"]), "MUNIC_RES")
-                            if col_mun_res in cols_parquet:
-                                query = f"SELECT \"{col_mun_res}\" AS CODIGO_MUNICIPIO, COUNT(*) AS TOTAL_REGISTROS FROM read_parquet('{caminho}') GROUP BY \"{col_mun_res}\" ORDER BY TOTAL_REGISTROS DESC"
-                                df = duckdb.query(query).df()
-                                print(f"[DUCKDB SQL] Arquivo '{caminho}' processado em modo estadual seguro. Linhas extraídas: {len(df)}")
-                                frames.append(df)
-                            else:
-                                df = leitura_segura_parquet(caminho, limite=50000)
-                                frames.append(df)
-                                
-                        # MODO ESTADO PESADO (Amostra Limitada Segura de Microdados)
                         else:
-                            limite_linhas = 50000 if sistema in BASES_PESADAS else 200000
-                            query = f"SELECT * FROM read_parquet('{caminho}') LIMIT {limite_linhas}"
-                            df = duckdb.query(query).df()
-                            print(f"[DUCKDB SQL] Arquivo '{caminho}' processado em modo estadual seguro. Linhas extraídas: {len(df)}")
-                            frames.append(df)
-                            
-                    except Exception as e:
-                        print(f"[DUCKDB ERRO] {repr(e)}")
-                        frames.append(leitura_segura_parquet(caminho, limite=50000))
+                            print(
+                                f"[DUCKDB ALERTA] Coluna territorial não encontrada para resumo agregado. "
+                                f"Aplicando leitura segura limitada."
+                            )
+                            frames.append(leitura_segura_parquet(caminho, limite=50000))
+
+                    # MODO 3: ESTADO + BASE PESADA — amostra limitada, com filtro de UF quando SINAN.
+                    else:
+                        limite_linhas = 50000 if sistema in BASES_PESADAS else 500000
+                        codigo_uf = ESTADOS_IBGE.get(uf, "")
+
+                        if "SINAN" in sistema and nivel_terr == "Estado" and col_filtro and codigo_uf:
+                            query = f"""
+                                SELECT *
+                                FROM read_parquet('{caminho_sql}')
+                                WHERE CAST("{col_filtro}" AS VARCHAR) LIKE '{codigo_uf}%'
+                                LIMIT {limite_linhas}
+                            """
+                            modo = f"amostra estadual filtrada por UF {codigo_uf}"
+                        else:
+                            query = f"""
+                                SELECT *
+                                FROM read_parquet('{caminho_sql}')
+                                LIMIT {limite_linhas}
+                            """
+                            modo = f"modo seguro com limite {limite_linhas}"
+
+                        df = duckdb.query(query).df()
+                        print(
+                            f"[DUCKDB SQL] Arquivo '{caminho}' processado em {modo}. "
+                            f"Linhas extraídas: {len(df)}"
+                        )
+                        frames.append(df)
+
+                except Exception as e:
+                    print(f"[DUCKDB ERRO] {repr(e)}")
+                    frames.append(leitura_segura_parquet(caminho, limite=50000))
+
             if frames:
                 return pd.concat(frames, ignore_index=True), arquivos_lidos
+
     except Exception as e:
         print(f"[ERRO processar_retorno_pysus] {repr(e)}")
+
     return pd.DataFrame(), arquivos_lidos
 
 # --- MOTOR DATASUS ATUALIZADO ---
@@ -290,7 +421,18 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                         for kwargs in combinacoes:
                             try:
                                 res = api_sih(**kwargs)
-                                df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado)
+                                df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
+                                    res,
+                                    cols_alvo,
+                                    id_filtro,
+                                    sistema,
+                                    nivel_terr,
+                                    uf,
+                                    m,
+                                    dt_alvos,
+                                    tipo_resultado,
+                                    prefixo_esperado=sih_grupo
+                                )
                                 if not df_temp.empty: 
                                     break
                             except: continue
@@ -298,7 +440,18 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                         # 🌟 CORREÇÃO 13: CNES TRAVADO SEMPRE COM APENAS GROUP=CNES_GRUPO
                         try: res = api_cnes(state=uf, year=ano, month=m, group=cnes_grupo)
                         except: res = None
-                        df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado)
+                        df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
+                            res,
+                            cols_alvo,
+                            id_filtro,
+                            sistema,
+                            nivel_terr,
+                            uf,
+                            m,
+                            dt_alvos,
+                            tipo_resultado,
+                            prefixo_esperado=cnes_grupo
+                        )
                 except Exception as e:
                     falhas.append(f"Erro {sistema} | {uf} {ano}/{m}: {e}")
                     continue
@@ -411,7 +564,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
         agravo_sel = sih_grupo_sel = cnes_grupo_sel = None
         
         if "SINAN" in sistema:
-            mapa_doencas = {"Acidente de trabalho": "ACGR", "Acidente de trabalho com material biológico": "ACBI", "AIDS em adultos": "AIDA", "AIDS em crianças": "AIDC", "Câncer Relacionado ao Trabalho": "CANC", "Chikungunya": "CHIK", "Dengue": "DENG", "Doença de Chagas": "CHAG", "Hepatites Virais": "HEPA", "HIV em adultos": "HIVA", "HIV em crianças": "HIVC", "HIV em crianças expostas": "HIVE", "Leptospirose": "LEPT", "Meningite": "MENI", "Perda Auditiva por Ruído (Trabalho)": "PAIR", "Raiva Humana": "RAIV", "Sífilis Adquirida": "SIFA", "Sífilis Congênita": "SIFC", "Sífilis em Gestante": "SIFG", "Transtornos Mentais (Trabalho)": "MENT", "Tuberculose": "TUBE", "Varicela": "VARC", "Violência doméstica/sexual": "VIOL", "Zika Virús": "ZIKA"}
+            mapa_doencas = {"Acidente de trabalho": "ACGR", "Acidente de trabalho com material biológico": "ACBI", "AIDS em adultos": "AIDA", "AIDS em crianças": "AIDC", "Câncer Relacionado ao Trabalho": "CANC", "Chikungunya": "CHIK", "Dengue": "DENG", "Doença de Chagas": "CHAG", "Hepatites Virais": "HEPA", "HIV em adultos": "HIVA", "HIV em crianças": "HIVC", "HIV em crianças expostas": "HIVE", "Leptospirose": "LEPT", "Meningite": "MENI", "Perda Auditiva por Ruído (Trabalho)": "PAIR", "Raiva Humana": "RAIV", "Sífilis Adquirida": "SIFA", "Sífilis Congênita": "SIFC", "Sífilis em Gestante": "SIFG", "Transtornos Mentais (Trabalho)": "MENT", "Tuberculose": "TUBE", "Varicela": "VARC", "Violência doméstica/sexual": "VIOL", "Zika Vírus": "ZIKA"}
             nome_agravo = st.sidebar.selectbox("Doença/Agravo:", sorted(list(mapa_doencas.keys())))
             agravo_sel = mapa_doencas[nome_agravo]
         elif "SIH" in sistema:
@@ -421,7 +574,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
             mapa_cnes = {"ST - Estabelecimentos": "ST", "PF - Profissionais": "PF", "SR - Serviços": "SR", "HB - Habilitações": "HB", "IN - Incentivos": "IN", "EP - Estabelecimento por Procedimento": "EP", "EQ - Equipamentos": "EQ", "LT - Leitos": "LT", "DC - Dados Complementares": "DC"}
             cnes_grupo_sel = mapa_cnes[st.sidebar.selectbox("Grupo de Dados (CNES):", list(mapa_cnes.keys()))]
         
-        ano_sel = st.sidebar.selectbox("Ano de Reference:", listar_anos_disponiveis(sistema))
+        ano_sel = st.sidebar.selectbox("Ano de Referência:", listar_anos_disponiveis(sistema))
         
         if "SINASC" in sistema and ano_sel >= 2021:
             st.sidebar.warning("⚠️ **Aviso de Migração:** Os microdados de Nascidos Vivos após 2020 foram movidos para o Portal de Dados Abertos.")
