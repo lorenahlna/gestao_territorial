@@ -8,6 +8,7 @@ from datetime import datetime
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# --- CONFIGURAÇÃO DE DESIGN DA PÁGINA ---
 st.set_page_config(
     page_title="Inteligência Territorial | SIDRA + DATASUS",
     page_icon="📊",
@@ -22,6 +23,55 @@ st.markdown("""
     .footer-text { text-align: center; color: #666; font-size: 14px; margin-top: 50px; padding-top: 20px; border-top: 1px solid #ddd; }
     </style>
 """, unsafe_allow_html=True)
+
+# --- 1. PUXANDO O JSON DE CONFIGURAÇÕES (O SEU GITHUB) ---
+
+@st.cache_data(show_spinner=False)
+def carregar_dicionarios_github():
+    URL_RAW_GITHUB = "https://raw.githubusercontent.com/lorenahlna/gestao_territorial/refs/heads/main/dicionarios.json"
+    try:
+        res = requests.get(URL_RAW_GITHUB, timeout=10)
+        res.raise_for_status()
+        return res.json()
+    except Exception as e:
+        st.warning("⚠️ Usando dicionários de contingência (Falha ao ler o JSON).")
+        return {
+            "CBO_ESPECIFICOS": {"2251": "Médicos clínicos", "2235": "Enfermeiros"},
+            "CBO_SUBGRUPOS": {"01": "Forças Armadas", "11": "Dirigentes", "22": "Profissionais de Saúde"},
+            "DICIONARIOS_VALORES": {"SIM": {"SEXO": {"1": "Masculino", "2": "Feminino", "M": "Masculino", "F": "Feminino"}}},
+            "TRADUCAO_CABECALHOS": {"SIM": {"CAUSABAS": "Causa Básica (CID-10)"}}
+        }
+
+CONFIG_APP = carregar_dicionarios_github()
+
+# --- 2. PUXANDO AS TABELAS PESADAS DO REPOSITÓRIO (CARTAPROALE) ---
+
+@st.cache_data(show_spinner=False)
+def carregar_tabelas_cartaproale():
+    """Baixa dicionários pesados em CSV diretamente do repositório indicado"""
+    BASE_RAW_URL = "https://raw.githubusercontent.com/cartaproale/PySUS/main/tabelas/"
+    tabelas = {"CBO": {}, "CID10": {}}
+    
+    # 1. Tabela CBO (Profissões)
+    try:
+        # ⚠️ AJUSTE: Se o nome da tabela CBO for diferente no repo deles, altere o "cbo.csv" abaixo
+        df_cbo = pd.read_csv(BASE_RAW_URL + "cbo.csv", sep=";", dtype=str, encoding='utf-8')
+        # Cria o dicionário onde a Coluna 1 é a chave (Código) e a Coluna 2 é o valor (Descrição)
+        tabelas["CBO"] = dict(zip(df_cbo.iloc[:, 0], df_cbo.iloc[:, 1]))
+    except:
+        pass
+        
+    # 2. Tabela CID-10 (Doenças)
+    try:
+        # ⚠️ AJUSTE: Se o nome da tabela CID for diferente, altere o "cid10.csv" abaixo
+        df_cid = pd.read_csv(BASE_RAW_URL + "cid10.csv", sep=";", dtype=str, encoding='utf-8')
+        tabelas["CID10"] = dict(zip(df_cid.iloc[:, 0], df_cid.iloc[:, 1]))
+    except:
+        pass
+        
+    return tabelas
+
+TABELAS_CARTAPROALE = carregar_tabelas_cartaproale()
 
 # --- FUNÇÕES DE METADADOS E TERRITÓRIO ---
 
@@ -57,8 +107,7 @@ except ImportError:
 
 @st.cache_data
 def listar_anos_disponiveis():
-    ano_atual = datetime.now().year
-    return list(range(ano_atual, 1995, -1))
+    return list(range(datetime.now().year, 1995, -1))
 
 MESES_NOMES = [
     "Todos os Meses", "01 - Janeiro", "02 - Fevereiro", "03 - Março", "04 - Abril",
@@ -66,100 +115,92 @@ MESES_NOMES = [
     "09 - Setembro", "10 - Outubro", "11 - Novembro", "12 - Dezembro"
 ]
 
-# --- TRATAMENTO DATASUS E CBO ---
+# --- TRATADORES COM RECURSOS DO GITHUB INTEGRADOS ---
 
 def decodificar_idade_datasus(valor):
     if pd.isna(valor) or str(valor).strip() == '': return "Não informado"
     try:
         valor_str = str(int(float(valor))).zfill(3)
         if len(valor_str) == 3:
-            unidade, quantidade = valor_str[0], int(valor_str[1:])
-            if unidade == '1': return f"{quantidade} Minuto(s)"
-            elif unidade == '2': return f"{quantidade} Hora(s)"
-            elif unidade == '3': return f"{quantidade} Mês(es)"
-            elif unidade == '4': return f"{quantidade} Ano(s)"
-            elif unidade == '5': return f"{100 + quantidade} Ano(s)"
-            else: return f"{quantidade} (Unidade não identificada)"
+            u, q = valor_str[0], int(valor_str[1:])
+            if u == '1': return f"{q} Minuto(s)"
+            elif u == '2': return f"{q} Hora(s)"
+            elif u == '3': return f"{q} Mês(es)"
+            elif u == '4': return f"{q} Ano(s)"
+            elif u == '5': return f"{100 + q} Ano(s)"
+            else: return f"{q} (Und. ñ identificada)"
         elif len(valor_str) == 2: return f"{int(valor_str)} Ano(s)"
         else: return str(valor)
     except: return "Erro na Leitura"
 
-def decodificar_cbo(codigo):
-    if pd.isna(codigo) or str(codigo).strip() in ['', 'None', 'nan', '999999']: return "Não informado / Ignorado"
+def decodificar_cbo_github(codigo, dict_cbo_repo):
+    if pd.isna(codigo) or str(codigo).strip() in ['', 'None', 'nan', '999999', '000000']: 
+        return "Não informado / Ignorado"
+    
     cod_str = str(codigo).split('.')[0].zfill(6)
-    if cod_str.startswith('0'): return f"{cod_str} - Forças Armadas/Policiais"
-    elif cod_str.startswith('1'): return f"{cod_str} - Dirigentes e Gestores"
-    elif cod_str.startswith('2'): return f"{cod_str} - Profissionais de Ciências/Artes"
-    elif cod_str.startswith('3'): return f"{cod_str} - Técnicos de Nível Médio"
-    elif cod_str.startswith('4'): return f"{cod_str} - Trabalhadores Administrativos"
-    elif cod_str.startswith('5'): return f"{cod_str} - Trabalhadores de Serviços/Vendas"
-    elif cod_str.startswith('6'): return f"{cod_str} - Trabalhadores Agropecuários/Florestais"
-    elif cod_str.startswith('7') or cod_str.startswith('8'): return f"{cod_str} - Trabalhadores de Produção Industrial"
-    elif cod_str.startswith('9'): return f"{cod_str} - Trabalhadores de Manutenção/Reparo"
-    else: return f"{cod_str} - Ocupação não classificada"
+    
+    # Plano A: Usa a tabela CSV gigante do repositório 'cartaproale'
+    if dict_cbo_repo:
+        if cod_str in dict_cbo_repo: return f"{cod_str} - {dict_cbo_repo[cod_str]}"
+        if cod_str[:4] in dict_cbo_repo: return f"{cod_str} - {dict_cbo_repo[cod_str[:4]]}"
+        if cod_str[:2] in dict_cbo_repo: return f"{cod_str} - {dict_cbo_repo[cod_str[:2]]}"
+    
+    # Plano B: Usa a tabela condensada em JSON do seu repositório
+    cbo_especificos = CONFIG_APP.get("CBO_ESPECIFICOS", {})
+    cbo_subgrupos = CONFIG_APP.get("CBO_SUBGRUPOS", {})
+    
+    if cod_str[:4] in cbo_especificos:
+        return f"{cod_str} - {cbo_especificos[cod_str[:4]]}"
+        
+    prefixo_2 = cod_str[:2]
+    grupo_nome = cbo_subgrupos.get(prefixo_2, "Ocupação geral/Não classificada")
+    return f"{cod_str} - {grupo_nome}"
 
-DICIONARIOS_VALORES = {
-    "SIM": {
-        "ACIDTRAB": {"1": "Sim", "2": "Não"}, 
-        "CIRCOBITO": {"1": "Acidente", "2": "Suicídio", "3": "Homicídio", "4": "Outros"}, 
-        "LOCOCOR": {"1": "Hospital", "2": "Outro estabelecimento", "3": "Domicílio", "4": "Via pública", "5": "Outros"}, 
-        "NECROPSIA": {"1": "Sim", "2": "Não"}, 
-        "RACACOR": {"1": "Branca", "2": "Preta", "3": "Amarela", "4": "Parda", "5": "Indígena"}, 
-        "SEXO": {"1": "Masculino", "2": "Feminino", "M": "Masculino", "F": "Feminino"}, 
-        "TIPOBITO": {"1": "Fetal", "2": "Não fetal"},
-        "ESTCIV": {"1": "Solteiro", "2": "Casado", "3": "Viúvo", "4": "Separado/Divorciado", "5": "União estável", "9": "Ignorado"},
-        "ESC2010": {"0": "Sem escolaridade", "1": "Fundamental I", "2": "Fundamental II", "3": "Médio", "4": "Superior incompleto", "5": "Superior completo", "9": "Ignorado"}
-    },
-    "SINASC": {
-        "ESTCIVMAE": {"1": "Solteira", "2": "Casada", "3": "Viúva", "4": "Separada/Divorciada", "5": "União Consensual", "9": "Ignorado"}, 
-        "ESCMAE2010": {"0": "Sem escolaridade", "1": "Fundamental I", "2": "Fundamental II", "3": "Médio", "4": "Superior inc.", "5": "Superior comp.", "9": "Ignorado"},
-        "GRAVIDEZ": {"1": "Única", "2": "Dupla", "3": "Tripla ou mais", "9": "Ignorado"}, 
-        "IDANOMAL": {"1": "Sim", "2": "Não", "9": "Ignorado"}, 
-        "LOCNASC": {"1": "Hospital", "2": "Outro estabelecimento", "3": "Domicílio"}, 
-        "PARTO": {"1": "Vaginal/Normal", "2": "Cesáreo", "9": "Ignorado"}, 
-        "RACACOR": {"1": "Branca", "2": "Preta", "3": "Amarela", "4": "Parda", "5": "Indígena"}, 
-        "SEXO": {"1": "Masculino", "2": "Feminino", "0": "Ignorado"}
-    },
-    "SINAN": {
-        "CS_SEXO": {"M": "Masculino", "F": "Feminino", "I": "Ignorado"}, 
-        "CS_RACA": {"1": "Branca", "2": "Preta", "3": "Amarela", "4": "Parda", "5": "Indígena", "9": "Ignorado"}, 
-        "EVOLUCAO": {"1": "Cura", "2": "Óbito pelo agravo", "3": "Óbito por outras causas", "9": "Ignorado"},
-        "CS_ESCOL_N": {"00": "Sem instrução", "01": "Fundamental I", "02": "Fundamental II", "03": "Médio", "04": "Superior", "05": "Não se aplica", "09": "Ignorado", "10": "Ignorado"},
-        "CS_EST_CIV": {"1": "Solteiro", "2": "Casado", "3": "Viúvo", "4": "Separado/Divorciado", "9": "Ignorado"}
-    }
-}
-
-TRADUCAO_CABECALHOS = {
-    "SIM": {"IDADE": "Idade Formatada", "ESTCIV": "Estado Civil", "ESC2010": "Escolaridade (2010)", "ACIDTRAB": "Acidente de Trabalho", "CAUSABAS": "Causa Básica (CID-10)", "CIRCOBITO": "Circunstância do Óbito", "CODESTAB": "Código CNES (Óbito)", "CODMUNOCOR": "Município Ocorrência", "CODMUNRES": "Município Residência", "DTNASC": "Data de Nascimento", "DTOBITO": "Data do Óbito", "LOCOCOR": "Local de Ocorrência", "NECROPSIA": "Necropsia", "OCUP": "Ocupação/Profissão (CBO)", "RACACOR": "Raça/Cor", "SEXO": "Sexo", "TIPOBITO": "Tipo de Óbito"},
-    "SIH": {"SP_AA": "Ano Competência", "SP_CNES": "Código Hospital (CNES)", "SP_DTINTER": "Data Internação", "SP_DTSAIDA": "Data Saída/Alta", "SP_NAIH": "Número AIH", "SP_PROCREA": "Procedimento Realizado", "SP_QTD_ATO": "Quantidade do Ato", "SP_UF": "UF Internação", "SP_VALATO": "Valor Pago (R$)"},
-    "SINASC": {"IDADEMAE": "Idade da Mãe (Anos)", "ESTCIVMAE": "Estado Civil Mãe", "ESCMAE2010": "Escolaridade Mãe (2010)", "OCUPMAE": "Ocupação/Profissão Mãe (CBO)", "APGAR1": "Apgar 1º Minuto", "APGAR5": "Apgar 5º Minuto", "CODANOMAL": "CID Anomalia", "CODESTAB": "Código Maternidade (CNES)", "CONSULTAS": "Consultas Pré-Natal", "DTNASC": "Data Nascimento", "GESTACAO": "Semanas Gestação", "GRAVIDEZ": "Tipo Gravidez", "IDANOMAL": "Anomalia Congênita", "LOCNASC": "Local Nascimento", "PARTO": "Tipo Parto", "PESO": "Peso (g)", "RACACOR": "Raça/Cor Bebê", "SEXO": "Sexo Bebê"},
-    "SINAN": {"DT_NOTIFIC": "Data de Notificação", "DT_SIN_PRI": "Data Primeiros Sintomas", "ID_MUNICIP": "Município Notificação (IBGE)", "ID_MN_RESI": "Município Residência (IBGE)", "NU_IDADE_N": "Idade Formatada", "CS_SEXO": "Sexo", "CS_RACA": "Raça/Cor", "CS_ESCOL_N": "Escolaridade", "CS_EST_CIV": "Estado Civil", "ID_OCUPA_N": "Ocupação/Profissão (CBO)", "CLASSI_FIN": "Classificação Final", "EVOLUCAO": "Evolução do Caso"}
-}
+def decodificar_cid_github(codigo, dict_cid_repo):
+    if pd.isna(codigo) or str(codigo).strip() in ['', 'None', 'nan']: 
+        return "Não informado"
+    
+    cod_str = str(codigo).strip().upper()
+    
+    # Tenta cruzar com a tabela de Doenças do 'cartaproale'
+    if dict_cid_repo:
+        if cod_str in dict_cid_repo: return f"{cod_str} - {dict_cid_repo[cod_str]}"
+        if cod_str[:3] in dict_cid_repo: return f"{cod_str} - {dict_cid_repo[cod_str[:3]]}"
+        return f"{cod_str} - CID não mapeada no dicionário"
+    
+    # Se a tabela falhar em carregar, devolve a sigla original
+    return cod_str
 
 def tratar_e_traduzir_df(df, sistema):
     df_tratado = df.copy()
     sigla_sistema = "SIM" if "SIM" in sistema else "SINASC" if "SINASC" in sistema else "SIH" if "SIH" in sistema else "CNES" if "CNES" in sistema else "SINAN"
     
-    # Tratamento de Idades
     if sigla_sistema == "SIM" and "IDADE" in df_tratado.columns: df_tratado["IDADE"] = df_tratado["IDADE"].apply(decodificar_idade_datasus)
     if sigla_sistema == "SINASC" and "IDADEMAE" in df_tratado.columns: df_tratado["IDADEMAE"] = df_tratado["IDADEMAE"].apply(decodificar_idade_datasus)
     if sigla_sistema == "SINAN" and "NU_IDADE_N" in df_tratado.columns: df_tratado["NU_IDADE_N"] = df_tratado["NU_IDADE_N"].apply(decodificar_idade_datasus)
 
-    # Mapeamento CBO 2002 (Ocupação/Profissão)
-    if "OCUP" in df_tratado.columns: df_tratado["OCUP"] = df_tratado["OCUP"].apply(decodificar_cbo)
-    if "OCUPMAE" in df_tratado.columns: df_tratado["OCUPMAE"] = df_tratado["OCUPMAE"].apply(decodificar_cbo)
-    if "ID_OCUPA_N" in df_tratado.columns: df_tratado["ID_OCUPA_N"] = df_tratado["ID_OCUPA_N"].apply(decodificar_cbo)
+    # Aplicação do CBO Github
+    dict_cbo = TABELAS_CARTAPROALE.get("CBO", {})
+    if "OCUP" in df_tratado.columns: df_tratado["OCUP"] = df_tratado["OCUP"].apply(lambda x: decodificar_cbo_github(x, dict_cbo))
+    if "OCUPMAE" in df_tratado.columns: df_tratado["OCUPMAE"] = df_tratado["OCUPMAE"].apply(lambda x: decodificar_cbo_github(x, dict_cbo))
+    if "ID_OCUPA_N" in df_tratado.columns: df_tratado["ID_OCUPA_N"] = df_tratado["ID_OCUPA_N"].apply(lambda x: decodificar_cbo_github(x, dict_cbo))
 
-    # Tradução de Chaves Categóricas (Estado Civil, Raça, etc)
-    dict_valores = DICIONARIOS_VALORES.get(sigla_sistema, {})
+    # Aplicação do CID-10 Github
+    dict_cid = TABELAS_CARTAPROALE.get("CID10", {})
+    colunas_doencas = ["CAUSABAS", "CAUSABAS_O", "DIAG_PRINC", "CODANOMAL"]
+    for col in colunas_doencas:
+        if col in df_tratado.columns:
+            df_tratado[col] = df_tratado[col].apply(lambda x: decodificar_cid_github(x, dict_cid))
+
+    dict_valores = CONFIG_APP.get("DICIONARIOS_VALORES", {}).get(sigla_sistema, {})
     for coluna, de_para in dict_valores.items():
         if coluna in df_tratado.columns:
             df_tratado[coluna] = df_tratado[coluna].astype(str).map(de_para).fillna("Ignorado/Outros")
             
-    df_tratado = df_tratado.rename(columns=TRADUCAO_CABECALHOS.get(sigla_sistema, {}))
+    df_tratado = df_tratado.rename(columns=CONFIG_APP.get("TRADUCAO_CABECALHOS", {}).get(sigla_sistema, {}))
     return df_tratado
 
-# --- MOTOR DATASUS COM RADAR DE COLUNAS ---
+# --- MOTOR DATASUS COM RADAR DE COLUNAS E DETECTOR DE FALHAS ---
 
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Brasil", id_datasus_alvo=""):
     if not sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
@@ -306,7 +347,7 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
     
     return df_final.drop_duplicates()
 
-# --- INTERFACE ---
+# --- INTERFACE PRINCIPAL ---
 
 st.sidebar.title("🧬 Navegação e Filtros")
 
@@ -436,7 +477,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                     st.markdown(f'<div class="metric-card"><h2>{len(df_bruto)} Registros Encontrados</h2><p>{sistema_titulo} - {nome_local} ({ano_sel})</p></div>', unsafe_allow_html=True)
                     st.info("💡 Apenas as primeiras 100 linhas são exibidas abaixo. Use os botões para exportar a base completa.")
                     
-                    # 🌟 NOVA ESTRUTURA EM ABAS (TABS)
                     tab1, tab2 = st.tabs(["✅ Planilha Tratada (Visualização Amigável)", "⚙️ Planilha Bruta (Códigos Originais)"])
                     
                     with tab1:
@@ -470,15 +510,14 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                 except:
                     st.error("O servidor do Ministério encontra-se fora do ar ou bloqueou a conexão. Tente mais tarde.")
 
-    # 🌟 RODAPÉ ATUALIZADO
     st.markdown("""
         <div class="footer-text">
             <b>Fontes de Dados:</b> Ministério da Saúde (DATASUS) | IBGE | Ministério da Cidadania (VIS DATA 3)<br>
-            <i>Sistema construído com arquitetura PySUS. Otimizado com Garbage Collector (Limpeza de RAM ativa).</i>
+            <i>Sistema construído com arquitetura PySUS e Dicionários Desacoplados. Otimizado com Garbage Collector (Limpeza de RAM ativa).</i>
         </div>
     """, unsafe_allow_html=True)
 
-# 🌟 NOVA ABA DE DICIONÁRIOS E CITAÇÕES
+# 🌟 ABA DE DICIONÁRIOS E CITAÇÕES
 elif aba_ativa == "📚 Dicionários e Citações":
     st.title("📚 Dicionários de Dados e Normas de Citação")
     st.markdown("---")
@@ -490,17 +529,20 @@ elif aba_ativa == "📚 Dicionários e Citações":
         st.markdown("""
         * **ESTCIV (Estado Civil):** 1-Solteiro | 2-Casado | 3-Viúvo | 4-Separado/Divorciado | 5-União estável | 9-Ignorado
         * **ESC2010 (Escolaridade):** 0-Sem escolaridade | 1-Fundamental I | 2-Fundamental II | 3-Médio | 4-Superior incompleto | 5-Superior completo | 9-Ignorado
-        * **OCUP (Ocupação):** Traduzido automaticamente pelo Grande Grupo da CBO-2002.
+        * **OCUP (Ocupação):** Traduzido automaticamente pelos dicionários externos (CBO-2002).
+        * **CAUSABAS (Causa Básica):** Traduzido automaticamente pelo dicionário CID-10 integrado via Github.
         * **TIPOBITO:** 1-Fetal | 2-Não fetal
         * **CIRCOBITO (Circunstância):** 1-Acidente | 2-Suicídio | 3-Homicídio | 4-Outros
+        * **LOCOCOR (Local de Ocorrência):** 1-hospital | 2-outros estabelecimentos de saúde | 3-domicílio | 4-via pública | 5-outros | 6-aldeia indigena | 9-ignorado
         """)
         
     with st.expander("👶 SINASC (Sistema de Informações sobre Nascidos Vivos)"):
         st.markdown("""
         * **ESTCIVMAE (Estado Civil da Mãe):** 1-Solteira | 2-Casada | 3-Viúva | 4-Separada/Divorciada | 5-União Consensual | 9-Ignorado
-        * **ESCMAE2010 (Escolaridade da Mãe):** Mesma regra do SIM.
-        * **GRAVIDEZ:** 1-Única | 2-Dupla | 3-Tripla ou mais | 9-Ignorado
-        * **PARTO:** 1-Vaginal/Normal | 2-Cesáreo | 9-Ignorado
+        * **ESCMAE2010 (Escolaridade da Mãe):** 0-Sem escolaridade | 1-Fundamental I | 2-Fundamental II | 3-Médio | 4-Superior incompleto | 5-Superior completo | 9-Ignorado
+        * **GRAVIDEZ:** 1-Única | 2-Dupla | 3-Tripla ou mais | 9-Ignorada
+        * **PARTO:** 1-Vaginal | 2-Cesáreo | 9-Ignorado
+        * **PESO:** Peso ao nascer em gramas
         """)
 
     with st.expander("🩺 SINAN (Sistema de Informação de Agravos de Notificação)"):
@@ -508,20 +550,19 @@ elif aba_ativa == "📚 Dicionários e Citações":
         * **CS_ESCOL_N (Escolaridade):** 00-Sem instrução | 01-Fundamental I | 02-Fundamental II | 03-Médio | 04-Superior | 05-Não se aplica | 09-Ignorado
         * **CS_EST_CIV (Estado Civil):** 1-Solteiro | 2-Casado | 3-Viúvo | 4-Separado/Divorciado | 9-Ignorado
         * **EVOLUCAO (Evolução do Caso):** 1-Cura | 2-Óbito pelo agravo | 3-Óbito por outras causas | 9-Ignorado
+        * **st_transmissao_vertical (Transmissão Vertical):** 1-Sim | 2-Não foi transmissão vertical | 9-Ignorado
+        * **tp_sexual (Transmissão Sexual):** 1-Relações sexuais com Homens | 2-Relações sexuais com Mulheres | 3-Relações sexuais com homens e mulheres | 4-Não foi transmissão sexual | 9-Ignorado
         """)
         
-    with st.expander("💼 CBO-2002 (Classificação Brasileira de Ocupações)"):
+    with st.expander("📂 Dicionários Externos Integrados (Repositório PySUS)"):
         st.markdown("""
-        O sistema traduz automaticamente a ocupação do paciente baseando-se no primeiro dígito da CBO-2002 para otimizar o processamento:
-        * `0` - Forças Armadas/Policiais
-        * `1` - Dirigentes e Gestores
-        * `2` - Profissionais de Ciências e Artes
-        * `3` - Técnicos de Nível Médio
-        * `4` - Trabalhadores de Serviços Administrativos
-        * `5` - Trabalhadores de Serviços e Vendas
-        * `6` - Trabalhadores Agropecuários e Florestais
-        * `7/8` - Trabalhadores de Produção Industrial
-        * `9` - Trabalhadores de Manutenção e Reparo
+        O sistema implementa uma engenharia de dados desacoplada, consultando os dicionários mestre diretamente da documentação oficial acessível validada do projeto PySUS no GitHub.
+
+        **1. CBO-2002 (Classificação Brasileira de Ocupações):**
+        * Realiza o mapeamento oficial cruzando a coluna original do DATASUS com o arquivo `cbo.csv` hospedado remotamente.
+
+        **2. CID-10 (Classificação Internacional de Doenças):**
+        * Extrai o significado clínico exato dos códigos presentes nas Autorizações de Internação Hospitalar (SIH) e Declarações de Óbito (SIM) via leitura paralela do `cid10.csv`.
         """)
         
     st.markdown("---")
