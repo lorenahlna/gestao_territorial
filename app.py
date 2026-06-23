@@ -455,7 +455,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                     st.markdown(f'<div class="metric-card"><h2>{len(df_bruto)} Registros Encontrados</h2><p>{sistema_titulo} - {nome_local} ({ano_sel})</p></div>', unsafe_allow_html=True)
                     st.info("💡 Apenas as primeiras 100 linhas são exibidas abaixo. Use os botões para exportar a base completa.")
                     
-                    tab1, tab2 = st.tabs(["✅ Planilha Tratada (Visualização Amigável)", "⚙️ Planilha Bruta (Códigos Originais)"])
+                    tab1, tab2 = st.tabs(["✅ Dados Tratados", "⚙️ Dados Brutos )"])
                     
                     with tab1:
                         st.dataframe(df_tratado.head(100), use_container_width=True)
