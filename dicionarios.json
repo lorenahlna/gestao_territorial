@@ -122,7 +122,8 @@
       "SP_DTINTER": "Data Internação",
       "SP_DTSAIDA": "Data Saída/Alta",
       "SP_NAIH": "Número AIH",
-      "SP_PROCREA": "Procedimento Realizado",
+      "PROC_REA": "Procedimento Realizado (SIGTAP)",
+      "PROC_SOLIC": "Procedimento Solicitado (SIGTAP)",
       "SP_QTD_ATO": "Quantidade do Ato",
       "SP_UF": "UF Internação",
       "SP_VALATO": "Valor Pago (R$)"
