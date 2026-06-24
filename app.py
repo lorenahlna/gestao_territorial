@@ -44,7 +44,7 @@ def listar_anos_disponiveis(sistema="GERAL"):
     ano_atual = datetime.now().year
     limites = {
         "Mortalidade (SIM)": (1979, 2024),
-        "Nascimentos (SINASC)": (1994, 2020),
+        "Nascimentos (SINASC)": (1994, 2019),
         "Notificações (SINAN)": (2007, 2026),
         "Internações (SIH)": (2008, 2026),
         "Cadastro Nacional de Estabelecimentos (CNES)": (2005, ano_atual),
@@ -540,11 +540,11 @@ def tratar_e_traduzir_df(df, sistema):
     return df_tratado
 
 # --- INTERFACE PRINCIPAL ---
-st.sidebar.title("🧬 Navegação e Filtros")
+st.sidebar.title("Navegação e Filtros")
 aba_ativa = st.sidebar.radio("Navegar para:", ["📋 Guia Principal (Extração)", "📚 Dicionários e Citações"])
 
 if aba_ativa == "📋 Guia Principal (Extração)":
-    st.markdown('<div class="header-sidra"><h1>Central de Inteligência Territorial</h1><p>DATASUS conectado via DuckDB | SIDRA e VIS DATA 3 em desenvolvimento</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="header-sidra"><h1>Central de Inteligência Territorial</h1><p>DATASUS | VIS DATA 3 em desenvolvimento</p></div>', unsafe_allow_html=True)
     fonte = st.sidebar.radio("Base de Informação:", ["🏥 Saúde (DATASUS)", "🏠 Social (VIS DATA 3 - Indisponível)"])
     if "VIS DATA 3" in fonte:
         st.warning("VIS DATA 3 ainda não está conectado nesta versão.")
