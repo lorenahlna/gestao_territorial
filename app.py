@@ -1,4 +1,4 @@
-# VERSAO_FINAL_SIH_RESTAURADA_HOMOLOGADA_V12
+# VERSAO_FINAL_SIH_PERFEITO_HOMOLOGADA_V12
 import streamlit as st
 import pandas as pd
 import requests
@@ -257,7 +257,8 @@ def normalizar_lista_arquivos_pysus(res):
     if hasattr(res, "path"): return [str(res.path)]
     return [str(res)]
 
-def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
+# 🌟 CORREÇÃO V12: TRATAMENTO SEMÂNTICO DE EXCLUSÃO PARA O FILTRO FÍSICO DO GRUPO RD
+def ajustar_filtro_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     if isinstance(arquivos, pd.DataFrame): return arquivos
     ano2 = str(ano)[-2:]
     mes2 = f"{int(mes):02d}" if mes is not None else ""
@@ -266,11 +267,16 @@ def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     selecionados = []
     for caminho in arquivos:
         nome = os.path.basename(str(caminho)).upper()
-        if nome.startswith(prefixo_exato): 
-            selecionados.append(caminho)
-        elif grupo.upper() in nome and uf.upper() in nome and ano2 in nome:
-            selecionados.append(caminho)
-            
+        if grupo == "RD":
+            # Para o RD (padrão), aceita se não for explicitamente dos grupos concorrentes SP/ER/CM e contiver a UF
+            if any(nome.startswith(g) for g in ["SP", "ER", "CM"]):
+                continue
+            if uf.upper() in nome:
+                selecionados.append(caminho)
+        else:
+            if nome.startswith(prefixo_exato) or (grupo.upper() in nome and uf.upper() in nome):
+                selecionados.append(caminho)
+                
     if not selecionados and arquivos:
         return arquivos
     return selecionados
@@ -301,11 +307,23 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
                 if not caminho.endswith(".parquet"): continue
 
                 nome_arquivo = os.path.basename(caminho).upper()
-                if prefixo_esperado:
+                if prefixo_esperado and sistema == "Internações (SIH)":
+                    prefixo = str(prefixo_esperado).upper()
+                    grupo_solicitado = prefixo[:2]
+                    
+                    # 🌟 CORREÇÃO V12: DUPLO ISOLAMENTO SEMÂNTICO DENTRO DO DUCKDB
+                    if grupo_solicitado == "RD":
+                        if any(nome_arquivo.startswith(g) for g in ["SP", "ER", "CM"]):
+                            continue
+                        if uf.upper() not in nome_arquivo:
+                            continue
+                    else:
+                        if not (grupo_solicitado in nome_arquivo and uf.upper() in nome_arquivo):
+                            continue
+                elif prefixo_esperado:
                     prefixo = str(prefixo_esperado).upper()
                     if not nome_arquivo.startswith(prefixo):
-                        grupo_essencial = prefixo[:2]
-                        if not (grupo_essencial in nome_arquivo and uf.upper() in nome_arquivo):
+                        if not (prefixo[:2] in nome_arquivo and uf.upper() in nome_arquivo):
                             continue
 
                 arquivos_lidos += 1
@@ -371,60 +389,13 @@ def gerar_metricas_cnes(df, grupo):
             if col in df.columns: df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)         
         metricas["principal_label"] = "Equipamentos existentes"
         metricas["principal_value"] = int(df["QT_EXIST"].sum()) if "QT_EXIST" in df.columns else len(df)
-    elif grupo == "LT":
+    elif group == "LT":
         for col in ["QT_EXIST", "QT_SUS", "QT_NSUS", "QT_CONTR"]:
             if col in df.columns: df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)              
         metricas["principal_label"] = "Leitos existentes"
         metricas["principal_value"] = int(df["QT_EXIST"].sum()) if "QT_EXIST" in df.columns else len(df)
     return metricas
 
-def tratar_e_traduzir_df(df, sistema):
-    df_tratado = df.copy()
-    df_tratado.columns = [str(c).upper().strip() for c in df_tratado.columns]
-    sigla_sistema = "SIM" if "SIM" in sistema else "SINASC" if "SINASC" in sistema else "SIH" if "SIH" in sistema else "CNES" if "CNES" in sistema else "SINAN"
-    
-    dic_dinamico = CONFIG_APP.get("DICIONARIOS_VALORES", {})
-    if "SIH" not in dic_dinamico: dic_dinamico["SIH"] = {}
-    dic_dinamico["SIH"].update({"SEXO": {"1": "Masculino", "3": "Feminino"}, "MORTE": {"0": "Alta", "1": "Óbito"}})
-    
-    if "SINASC" not in dic_dinamico: dic_dinamico["SINASC"] = {}
-    dic_dinamico["SINASC"].update({
-        "ESCMAE": {"1": "Nenhuma", "2": "1 a 3 anos", "3": "4 a 7 anos", "4": "8 a 11 anos", "5": "12 anos e mais", "9": "Ignorado"},
-        "ESCMAE2010": {"0": "Sem escolaridade", "1": "Fundamental I", "2": "Fundamental II", "3": "Médio", "4": "Superior incompleto", "5": "Superior completo", "9": "Ignorado"},
-        "RACACORMAE": {"1": "Branca", "2": "Preta", "3": "Amarela", "4": "Parda", "5": "Indígena", "9": "Ignorado"}
-    })
-
-    if "IDADE" in df_tratado.columns: df_tratado.loc[:, "IDADE"] = df_tratado["IDADE"].apply(decodificar_idade_datasus)
-    if "IDADEMAE" in df_tratado.columns: 
-        df_tratado.loc[:, "IDADEMAE"] = df_tratado["IDADEMAE"].apply(decodificar_idade_datasus)
-        df_tratado.loc[:, "GRUPO_IDADE_MAE"] = df_tratado["IDADEMAE"].apply(agrupar_idade_mae)
-    if "NU_IDADE_N" in df_tratado.columns: df_tratado.loc[:, "NU_IDADE_N"] = df_tratado["NU_IDADE_N"].apply(decodificar_idade_datasus)
-
-    for c_vbo in ["OCUP", "OCUPMAE", "CODOCUPMAE", "ID_OCUPA_N"]:
-        if c_vbo in df_tratado.columns: df_tratado.loc[:, c_vbo] = df_tratado[c_vbo].apply(decodificar_cbo)
-
-    dict_cid = TABELAS_EXTERNAS.get("CID10", {})
-    for col in ["CAUSABAS", "DIAG_PRINC", "DIAG_SECUN", "ID_AGRAVO"]:
-        if col in df_tratado.columns: df_tratado.loc[:, col] = df_tratado[col].apply(lambda x: decodificar_cid(x, dict_cid))
-
-    dict_sigtap = TABELAS_EXTERNAS.get("SIGTAP", {})
-    for col in ["PROC_REA", "PROC_SOLIC"]:
-        if col in df_tratado.columns: df_tratado.loc[:, col] = df_tratado[col].apply(lambda x: decodificar_sigtap(x, dict_sigtap))
-
-    for coluna, de_para in dic_dinamico.get(sigla_sistema, {}).items():
-        if coluna in df_tratado.columns:
-            df_tratado.loc[:, coluna] = df_tratado[coluna].apply(normalizar_codigo).map(de_para).fillna("Ignorado/Outros")
-            
-    cabecalhos = CONFIG_APP.get("TRADUCAO_CABECALHOS", {})
-    if "SIH" not in cabecalhos: cabecalhos["SIH"] = {}
-    cabecalhos["SIH"].update({"SEXO": "Sexo Paciente", "MORTE": "Desfecho (Alta/Óbito)", "VAL_TOT": "Valor Total AIH (R$)", "VAL_UTI": "Valor UTI (R$)", "DIAG_PRINC": "Diagnóstico Principal (CID-10)", "PROC_REA": "Procedimento Realizado (SIGTAP)"})
-    if "SINASC" not in cabecalhos: cabecalhos["SINASC"] = {}
-    cabecalhos["SINASC"].update({"GRUPO_IDADE_MAE": "Faixa Etária da Mãe", "ESCMAE": "Escolaridade Mãe (Anos)", "ESCMAE2010": "Escolaridade Mãe (2010)", "CODOCUPMAE": "Ocupação/Profissão Mãe (CBO)", "RACACORMAE": "Raça/Cor da Mãe"})
-    
-    df_tratado = df_tratado.rename(columns=cabecalhos.get(sigla_sistema, {}))
-    return df_tratado
-
-# --- 🌟 RESTAURAÇÃO DA LÓGICA DE DOWNLOAD EM CASCATA POSICIONAL DO SIH ---
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo="", tipo_resultado=""):
     if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     partes_final = [] 
@@ -445,7 +416,6 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                         prefixo_token = f"{sih_grupo}{uf}{str(ano)[-2:]}{int(m):02d}" if m else f"{sih_grupo}{uf}{str(ano)[-2:]}"
                         prefixo_token = prefixo_token.upper()
                         
-                        # Restauração cirúrgica do bloco cascata Try/Except original funcional
                         res = None
                         try:
                             res = api_sih(state=uf, year=int(ano), month=int(m) if m else 0, groups=[sih_grupo])
@@ -473,7 +443,7 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                             )
                         else:
                             arquivos_norm = normalizar_lista_arquivos_pysus(res)
-                            arquivos_norm = filtrar_arquivos_sih_exatos(arquivos_norm, uf, ano, m, sih_grupo)
+                            arquivos_norm = ajustar_filtro_arquivos_sih_exatos(arquivos_norm, uf, ano, m, sih_grupo)
                             df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
                                 arquivos_norm, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado, prefixo_esperado=prefixo_token
                             )
@@ -535,6 +505,52 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
         else:
             return pd.DataFrame({"Erro": ["Falha de conexão ou arquivo inexistente no DATASUS para os filtros selecionados."] })
     return pd.concat(partes_final, ignore_index=True)
+
+def tratar_e_traduzir_df(df, sistema):
+    df_tratado = df.copy()
+    df_tratado.columns = [str(c).upper().strip() for c in df_tratado.columns]
+    sigla_sistema = "SIM" if "SIM" in sistema else "SINASC" if "SINASC" in sistema else "SIH" if "SIH" in sistema else "CNES" if "CNES" in sistema else "SINAN"
+    
+    dic_dinamico = CONFIG_APP.get("DICIONARIOS_VALORES", {})
+    if "SIH" not in dic_dinamico: dic_dinamico["SIH"] = {}
+    dic_dinamico["SIH"].update({"SEXO": {"1": "Masculino", "3": "Feminino"}, "MORTE": {"0": "Alta", "1": "Óbito"}})
+    
+    if "SINASC" not in dic_dinamico: dic_dinamico["SINASC"] = {}
+    dic_dinamico["SINASC"].update({
+        "ESCMAE": {"1": "Nenhuma", "2": "1 a 3 anos", "3": "4 a 7 anos", "4": "8 a 11 anos", "5": "12 anos e mais", "9": "Ignorado"},
+        "ESCMAE2010": {"0": "Sem escolaridade", "1": "Fundamental I", "2": "Fundamental II", "3": "Médio", "4": "Superior incompleto", "5": "Superior completo", "9": "Ignorado"},
+        "RACACORMAE": {"1": "Branca", "2": "Preta", "3": "Amarela", "4": "Parda", "5": "Indígena", "9": "Ignorado"}
+    })
+
+    if "IDADE" in df_tratado.columns: df_tratado.loc[:, "IDADE"] = df_tratado["IDADE"].apply(decodificar_idade_datasus)
+    if "IDADEMAE" in df_tratado.columns: 
+        df_tratado.loc[:, "IDADEMAE"] = df_tratado["IDADEMAE"].apply(decodificar_idade_datasus)
+        df_tratado.loc[:, "GRUPO_IDADE_MAE"] = df_tratado["IDADEMAE"].apply(agrupar_idade_mae)
+    if "NU_IDADE_N" in df_tratado.columns: df_tratado.loc[:, "NU_IDADE_N"] = df_tratado["NU_IDADE_N"].apply(decodificar_idade_datasus)
+
+    for c_vbo in ["OCUP", "OCUPMAE", "CODOCUPMAE", "ID_OCUPA_N"]:
+        if c_vbo in df_tratado.columns: df_tratado.loc[:, c_vbo] = df_tratado[c_vbo].apply(decodificar_cbo)
+
+    dict_cid = TABELAS_EXTERNAS.get("CID10", {})
+    for col in ["CAUSABAS", "DIAG_PRINC", "DIAG_SECUN", "ID_AGRAVO"]:
+        if col in df_tratado.columns: df_tratado.loc[:, col] = df_tratado[col].apply(lambda x: decodificar_cid(x, dict_cid))
+
+    dict_sigtap = TABELAS_EXTERNAS.get("SIGTAP", {})
+    for col in ["PROC_REA", "PROC_SOLIC"]:
+        if col in df_tratado.columns: df_tratado.loc[:, col] = df_tratado[col].apply(lambda x: decodificar_sigtap(x, dict_sigtap))
+
+    for coluna, de_para in dic_dinamico.get(sigla_sistema, {}).items():
+        if coluna in df_tratado.columns:
+            df_tratado.loc[:, coluna] = df_tratado[coluna].apply(normalizar_codigo).map(de_para).fillna("Ignorado/Outros")
+            
+    cabecalhos = CONFIG_APP.get("TRADUCAO_CABECALHOS", {})
+    if "SIH" not in cabecalhos: cabecalhos["SIH"] = {}
+    cabecalhos["SIH"].update({"SEXO": "Sexo Paciente", "MORTE": "Desfecho (Alta/Óbito)", "VAL_TOT": "Valor Total AIH (R$)", "VAL_UTI": "Valor UTI (R$)", "DIAG_PRINC": "Diagnóstico Principal (CID-10)", "PROC_REA": "Procedimento Realizado (SIGTAP)"})
+    if "SINASC" not in cabecalhos: cabecalhos["SINASC"] = {}
+    cabecalhos["SINASC"].update({"GRUPO_IDADE_MAE": "Faixa Etária da Mãe", "ESCMAE": "Escolaridade Mãe (Anos)", "ESCMAE2010": "Escolaridade Mãe (2010)", "CODOCUPMAE": "Ocupação/Profissão Mãe (CBO)", "RACACORMAE": "Raça/Cor da Mãe"})
+    
+    df_tratado = df_tratado.rename(columns=cabecalhos.get(sigla_sistema, {}))
+    return df_tratado
 
 # --- INTERFACE PRINCIPAL ---
 st.sidebar.title("🧬 Navegação e Filtros")
@@ -602,9 +618,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
             cnes_grupo_sel = mapa_cnes[st.sidebar.selectbox("Grupo de Dados (CNES):", list(mapa_cnes.keys()))]
         
         ano_sel = st.sidebar.selectbox("Ano de Referência:", listar_anos_disponiveis(sistema))
-        if "SINASC" in sistema and ano_sel >= 2021:
-            st.sidebar.warning("⚠️ **Aviso de Migração:** Os microdados de Nascidos Vivos após 2020 foram movidos para o Portal de Dados Abertos.")
-            
+        
         nome_mes = st.sidebar.selectbox("Mês de Competência/Ocorrência:", ["Todos os Meses"] + MESES_NOMES, index=1)
         mes_sel = None if nome_mes == "Todos os Meses" else int(nome_mes.split(" - ")[0])
         
@@ -742,7 +756,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                     else:
                         msg = df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados disponíveis."
                         if "território, período ou agravo" in msg:
-                            st.info("ℹbox A consulta foi executada com sucesso, mas não foram encontrados registros de notificações para o agravo, território e período selecionados.")
+                            st.info("ℹ️ A consulta foi executada com sucesso, mas não foram encontrados registros de notificações para o agravo, território e período selecionados.")
                         else: st.error(msg)
 
 # --- ABA DE DICIONÁRIOS E CITAÇÕES ---
@@ -753,44 +767,44 @@ elif aba_ativa == "📚 Dicionários e Citações":
     
     with st.expander("🏥 CNES (Cadastro Nacional de Estabelecimentos de Saúde)"):
         st.markdown("""
-        O CNES deve ser tratado estritamente como um cadastro de capacidade instalada de unidades federativas[cite: 25].
-        * **ST - Estabelecimentos (TB_ESTABELECIMENTO):** Apresenta dados cadastrais básicos de unidades[cite: 82, 618]. A contagem única pelo método `CNES.nunique()` reflete o quantitativo real de estabelecimentos unificados[cite: 29].
-        * **PF - Vínculos Profissionais (TB_CARGA_HORARIA_SUS):** Registra contratos profissional-estabelecimento usando `COD_CBO`[cite: 82, 132, 611]. Representa o volume de vínculos ativos, não indivíduos físicos isolados[cite: 29].
-        * **SR - Serviços Especializados (RL_ESTAB_SERV_CLASS):** Cadastro técnico de serviços de saúde. Não deve ser interpretado como indicador de atendimentos efetuados[cite: 29].
-        * **HB / IN (RL_ESTAB_SIPAC):** Habilitações de alta complexidade e incentivos financeiros regulamentados[cite: 82]. Não espelham valores líquidos repassados sem colunas de faturamento explícias[cite: 29].
-        * **EP - Equipes (TB_EQUIPE):** Cadastro nominal de Equipes de Saúde da Família e correlatas (nomenclatura corrigida do PySUS)[cite: 29, 82].
-        * **EQ / LT - Equipamentos e Leitos (RL_ESTAB_EQUIPAMENTO / RL_ESTAB_COMPLEMENTAR):** Linhas de tabelas quantitativas[cite: 82]. **Atenção:** A função `len(df)` monitora apenas o controle operacional das linhas[cite: 14]. O total de itens instalados deve ser calculado pela consolidação da soma da coluna quantitativa `QT_EXIST`[cite: 29, 30].
+        O CNES deve ser tratado estritamente como um cadastro de capacidade instalada de unidades federativas.
+        * **ST - Estabelecimentos (TB_ESTABELECIMENTO):** Apresenta dados cadastrais básicos de unidades. A contagem única pelo método `CNES.nunique()` reflete o quantitativo real de estabelecimentos unificados.
+        * **PF - Vínculos Profissionais (TB_CARGA_HORARIA_SUS):** Registra contratos profissional-estabelecimento usando `COD_CBO`. Representa o volume de vínculos ativos, não indivíduos físicos isolados.
+        * **SR - Serviços Especializados (RL_ESTAB_SERV_CLASS):** Cadastro técnico de serviços de saúde. Não deve ser interpretado como indicador de atendimentos efetuados.
+        * **HB / IN (RL_ESTAB_SIPAC):** Habilitações de alta complexidade e incentivos financeiros regulamentados. Não espelham valores líquidos repassados sem colunas de faturamento explícias.
+        * **EP - Equipes (TB_EQUIPE):** Cadastro nominal de Equipes de Saúde da Família e correlatas (nomenclatura corrigida do PySUS).
+        * **EQ / LT - Equipamentos e Leitos (RL_ESTAB_EQUIPAMENTO / RL_ESTAB_COMPLEMENTAR):** Linhas de tabelas quantitativas. **Atenção:** A função `len(df)` monitora apenas o controle operacional das linhas. O total de itens instalados deve ser calculado pela consolidação da soma da coluna quantitativa `QT_EXIST`.
         """)
 
     with st.expander("🛏️ SIH (Sistema de Informações Hospitalares)"):
         st.markdown("""
-        O SIH atua como o sistema de registro de produção e faturamento hospitalar[cite: 25]. Os grupos disponíveis possuem naturezas completamente distintas:
-        * **Grupo RD (AIH Reduzida):** É a tabela padrão-ouro para análise epidemiológica de internações no país[cite: 10, 46]. Cada linha representa uma internação consolidada e efetiva de paciente que ocupou leito hospitalar[cite: 46].
-        * **Grupo SP (Serviços Profissionais):** Registra atos e procedimentos efetuados pelos profissionais de saúde vinculados ao faturamento hospitalar[cite: 46]. Um único paciente pode gerar dezenas de linhas neste grupo[cite: 47]. **Nunca utilize a contagem de linhas do grupo SP como métrica de internações**, sob risco de erro metodológico grave de superestimativa[cite: 11, 47].
-        * **Grupo ER (Emergência Referenciada):** Grupo técnico contendo fluxos específicos e dados de rejeições hospitalares com erros operacionais, mantido sob caráter de análise experimental[cite: 12, 46].
-        * **Grupo CM (Cirurgias Ambulatoriais):** Fluxo não geral que agrupa cirurgias de curtíssima permanência[cite: 46]. Devido ao limbo de faturamento, hospitais preferem reportar esses procedimentos no **SIA (Sistema Ambulatorial)**. Logo, possui subnotificação endêmica e está desativado para o fluxo mensal comum por UF nesta versão[cite: 46].
+        O SIH atua como o sistema de registro de produção e faturamento hospitalar. Os grupos disponíveis possuem naturezas completamente distintas:
+        * **Grupo RD (AIH Reduzida):** É a tabela padrão-ouro para análise epidemiológica de internações no país. Cada linha representa uma internação de paciente que ocupou leito hospitalar.
+        * **Grupo SP (Serviços Profissionais):** Registra atos e procedimentos efetuados pelos profissionais de saúde vinculados ao faturamento hospitalar. Um único paciente pode gerar dezenas de linhas neste grupo. **Nunca utilize a contagem de linhas do grupo SP como métrica de internações**, sob risco de erro metodológico grave de superestimativa.
+        * **Grupo ER (Emergência Referenciada):** Grupo técnico contendo fluxos específicos e dados de rejeições hospitalares com erros operacionais, mantido sob caráter de análise experimental.
+        * **Grupo CM (Cirurgias Ambulatoriais):** Fluxo não geral que agrupa cirurgias de curtíssima permanência. Devido ao limbo de faturamento, hospitais preferem reportar esses procedimentos no **SIA (Sistema Ambulatorial)**. Logo, possui subnotificação endêmica e está desativado para o fluxo mensal comum por UF nesta versão.
         
         **Campos Estruturais Mapeados (PCDaS / Fiocruz & Base dos Dados):**
-        * `N_AIH`: Número identificador nacional único da Autorização de Internação Hospitalar[cite: 80, 621].
-        * `MUNIC_RES` / `MUNIC_MOV`: Município de residência do paciente e município de movimentação da unidade hospitalar[cite: 80, 621].
-        * `VAL_SH` / `VAL_SP` / `VAL_TOT`: Divisão operacional de custos hospitalares. `VAL_SH` (Serviços Hospitalares), `VAL_SP` (Serviços Profissionais) e `VAL_TOT` (Valor total repassado de faturamento)[cite: 80, 621].
-        * `UTI_MES_TO`: Quantidade consolidada de diárias em leito de Unidade de Terapia Intensiva no mês de competência faturado[cite: 80, 621].
+        * `N_AIH`: Número identificador nacional único da Autorização de Internação Hospitalar.
+        * `MUNIC_RES` / `MUNIC_MOV`: Município de residência do paciente e município de movimentação da unidade hospitalar.
+        * `VAL_SH` / `VAL_SP` / `VAL_TOT`: Divisão operacional de custos hospitalares. `VAL_SH` (Serviços Hospitalares), `VAL_SP` (Serviços Profissionais) e `VAL_TOT` (Valor total repassado de faturamento).
+        * `UTI_MES_TO`: Quantidade consolidada de diárias em leito de Unidade de Terapia Intensiva no mês de competência faturado.
         """)
 
     with st.expander("💀 SIM (Sistema de Informações sobre Mortalidade)"):
         st.markdown("""
-        * **Resumo:** Registros de óbitos com campos demográficos e causas de morte codificadas por CID-10[cite: 622].
-        * **CAUSABAS:** A causa básica do óbito (CID-10), crucial para análises de mortalidade[cite: 622, 635].
+        * **Resumo:** Registros de óbitos com campos demográficos e causas de morte codificadas por CID-10.
+        * **CAUSABAS:** A causa básica do óbito (CID-10), crucial para análises de mortalidade.
         """)
         
     with st.expander("👶 SINASC (Sistema de Informações sobre Nascidos Vivos)"):
         st.markdown("""
-        * **Resumo:** Dados sobre os recém-nascidos, perfil demográfico das mães e características do parto no Brasil[cite: 627, 639].
+        * **Resumo:** Dados sobre os recém-nascidos, perfil demográfico das mães e características do parto no Brasil.
         """)
 
     with st.expander("🔬 SINAN (Sistema de Informação de Agravos de Notificação)"):
         st.markdown("""
-        * **Resumo:** Cadastro nacional de notificações de doenças compulsórias[cite: 624]. Monitora perfis epidemiológicos a partir de notificações estaduais[cite: 624].
+        * **Resumo:** Cadastro nacional de notificações de doenças compulsórias. Monitora perfis epidemiológicos a partir de notificações estaduais.
         """)
 
     st.markdown("---")
