@@ -1,4 +1,4 @@
-# VERSAO_FINAL_PRODUCAO_CORRIGIDA_V10
+# VERSAO_DEFINITIVA_SIH_HOMOLOGADA_V11
 import streamlit as st
 import pandas as pd
 import requests
@@ -169,9 +169,11 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
             df_t.loc[:, col_filtro_real] = df_t[col_filtro_real].apply(normalizar_codigo)
             df_t = df_t[df_t[col_filtro_real].str.startswith(id_datasus_alvo)].copy()
         
-        if mes_num is not None and dt_col_real:
-            meses_extraidos = extrair_mes_datasus(df_t[dt_col_real])
-            df_t = df_t[meses_extraidos == mes_num].copy()
+        # 🌟 CORREÇÃO METODOLÓGICA FIOCRUZ/BASE DOS DADOS: Ignora sub-filtro mensal para SIH e CNES (já vêm isolados por faturamento)
+        if sistema not in ["Internações (SIH)", "Cadastro Nacional de Estabelecimentos (CNES)"]:
+            if mes_num is not None and dt_col_real:
+                meses_extraidos = extrair_mes_datasus(df_t[dt_col_real])
+                df_t = df_t[meses_extraidos == mes_num].copy()
         
         if "SINAN" in sistema and not df_t.empty and len(df_t) > 50000:
             df_t = df_t.head(50000).copy()
@@ -213,20 +215,15 @@ def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     prefixo_exato = f"{grupo}{uf}{ano2}{mes2}".upper()
     
     selecionados = []
-    rejeitados = []
     for caminho in arquivos:
         nome = os.path.basename(str(caminho)).upper()
         if nome.startswith(prefixo_exato): 
             selecionados.append(caminho)
         elif grupo.upper() in nome and uf.upper() in nome and ano2 in nome:
             selecionados.append(caminho)
-        else: 
-            rejeitados.append(nome)
             
     if not selecionados and arquivos:
-        print(f"[SIH FILTRO] Prefixo rígido {prefixo_exato} não bateu. Ativando rede de segurança.")
         return arquivos
-        
     return selecionados
 
 # --- MOTOR SEMÂNTICO E CONSULTAS DUCKDB ---
@@ -260,7 +257,6 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
                     if not nome_arquivo.startswith(prefixo):
                         grupo_essencial = prefixo[:2]
                         if not (grupo_essencial in nome_arquivo and uf.upper() in nome_arquivo):
-                            print(f"[ARQUIVO REJEITADO] Fora do escopo semântico: {nome_arquivo}")
                             continue
 
                 arquivos_lidos += 1
@@ -275,7 +271,6 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
                         id_sql = str(id_alvo).replace("'", "''")
                         query = f"SELECT * FROM read_parquet('{caminho_sql}') WHERE CAST(\"{col_filtro}\" AS VARCHAR) LIKE '{id_sql}%'"
                         df = duckdb.query(query).df()
-                        print(f"[DUCKDB SQL] Município '{id_alvo}'. Linhas extraídas: {len(df)}")
                         frames.append(df)
 
                     elif nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Resumo agregado":
@@ -298,7 +293,6 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
                         df = duckdb.query(query).df()
                         frames.append(df)
                 except Exception as e:
-                    print(f"[DUCKDB INTERNO ERRO] {repr(e)}")
                     frames.append(leitura_segura_parquet(caminho, limite=50000))
             if frames: return pd.concat(frames, ignore_index=True), arquivos_lidos
     except Exception as e:
@@ -335,7 +329,6 @@ def gerar_metricas_cnes(df, grupo):
         metricas["principal_value"] = int(df["QT_EXIST"].sum()) if "QT_EXIST" in df.columns else len(df)
     return metricas
 
-# --- 🌟 CORREÇÃO DE PORTUNHOL APLICADA SUCESSO DE CABEÇALHOS NAS DUAS TRILHAS ---
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo="", tipo_resultado=""):
     if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     partes_final = [] 
@@ -360,8 +353,7 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                         try:
                             from pysus.online_data.SIH import download as download_sih_moderno
                             res = download_sih_moderno(state=uf, year=int(ano), month=int(m) if m else 0, group=sih_grupo)
-                        except Exception as e_mod:
-                            print(f"[SIH APIS] Avançando para Layout de Fallback Legado. Detalhe: {e_mod}")
+                        except: pass
                             
                         if res is None or (isinstance(res, list) and len(res) == 0):
                             combinacoes = [
@@ -379,7 +371,6 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                         if not isinstance(arquivos_norm, pd.DataFrame):
                             arquivos_norm = filtrar_arquivos_sih_exatos(arquivos_norm, uf, ano, m, sih_grupo)
                             
-                        # Correção unificada: Variável alterada de "archivos" para "arquivos"
                         df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
                             arquivos_norm, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado, prefixo_esperado=prefixo_token
                         )
@@ -431,7 +422,6 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                     sucessos_download += 1
                 else: falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO FINAL | {uf} {ano}")
             else:
-                # 🌟 SOLUÇÃO DO BUG: "archivos_lidos" alterado cirurgicamente para "arquivos_lidos"
                 if arquivos_lidos > 0: falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO TERRITORIAL | {uf} {ano}")
                 else: falhas.append(f"{sistema} FALHA DE DOWNLOAD OU ARQUIVO INEXISTENTE | {uf} {ano}")
         gc.collect()
@@ -615,6 +605,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
             submit_button = st.form_submit_button("🔍 Consultar Base")
 
         if submit_button:
+            # Trava do "Todos os Meses" só barra a Dengue no SINAN
             is_dengue = (sistema == "Notificações (SINAN)" and agravo_sel == "DENG")
             if mes_sel is None and (sistema in ["Internações (SIH)", "Cadastro Nacional de Estabelecimentos (CNES)"] or is_dengue):
                 st.error("Para SIH, CNES e SINAN (Dengue), selecione um mês específico. A opção 'Todos os Meses' foi liberada para os outros agravos leves do SINAN, mas permanece bloqueada nessas bases massivas para evitar estouro de RAM.")
@@ -687,6 +678,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     
                                     c_sexo, c_morte = st.columns(2)
                                     with c_sexo:
+                                        # 🌟 CORREÇÃO DE SINTAXE DE SESSÃO ANALÍTICA
                                         col_sexo = next((c for c in df_tratado.columns if "Sexo Paciente" in c), None)
                                         if col_sexo: st.bar_chart(df_tratado[col_sexo].value_counts())
                                     with c_morte:
