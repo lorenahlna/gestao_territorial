@@ -1,4 +1,4 @@
-# VERSAO_FINAL_PRODUCAO_BLINDADA_V9
+# VERSAO_FINAL_PRODUCAO_CORRIGIDA_V10
 import streamlit as st
 import pandas as pd
 import requests
@@ -206,7 +206,6 @@ def normalizar_lista_arquivos_pysus(res):
     if hasattr(res, "path"): return [str(res.path)]
     return [str(res)]
 
-# 🌟 CORREÇÃO: REDE DE SEGURANÇA NA FILTRAGEM DE ARQUIVOS FÍSICOS DO SIH
 def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     if isinstance(arquivos, pd.DataFrame): return arquivos
     ano2 = str(ano)[-2:]
@@ -217,7 +216,6 @@ def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     rejeitados = []
     for caminho in arquivos:
         nome = os.path.basename(str(caminho)).upper()
-        # Regra flexível: Aceita se começar com o token completo OU se contiver os elementos vitais (Grupo, UF e Ano)
         if nome.startswith(prefixo_exato): 
             selecionados.append(caminho)
         elif grupo.upper() in nome and uf.upper() in nome and ano2 in nome:
@@ -225,9 +223,8 @@ def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
         else: 
             rejeitados.append(nome)
             
-    # SALVAGUARDA ABSOLUTA: Se a limpeza zerou a lista por variação de nomenclatura, reverte e aceita todos os arquivos para a DuckDB validar internamente
     if not selecionados and arquivos:
-        print(f"[SIH FILTRO] Prefixo rígido {prefixo_exato} não bateu. Acionando rede de segurança com arquivos brutos.")
+        print(f"[SIH FILTRO] Prefixo rígido {prefixo_exato} não bateu. Ativando rede de segurança.")
         return arquivos
         
     return selecionados
@@ -260,7 +257,6 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
                 nome_arquivo = os.path.basename(caminho).upper()
                 if prefixo_esperado:
                     prefixo = str(prefixo_esperado).upper()
-                    # Salvaguarda no DuckDB: Aceita se contiver o par estrutural básico (Ex: RD e MG)
                     if not nome_arquivo.startswith(prefixo):
                         grupo_essencial = prefixo[:2]
                         if not (grupo_essencial in nome_arquivo and uf.upper() in nome_arquivo):
@@ -339,7 +335,7 @@ def gerar_metricas_cnes(df, grupo):
         metricas["principal_value"] = int(df["QT_EXIST"].sum()) if "QT_EXIST" in df.columns else len(df)
     return metricas
 
-# 🌟 CORREÇÃO: MULTI-ESTRATÉGIA DE DOWNLOAD (MODERNO + FALLBACK LEGADO) NO SIH
+# --- 🌟 CORREÇÃO DE PORTUNHOL APLICADA SUCESSO DE CABEÇALHOS NAS DUAS TRILHAS ---
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo="", tipo_resultado=""):
     if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     partes_final = [] 
@@ -361,14 +357,12 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                         prefixo_token = prefixo_token.upper()
                         
                         res = None
-                        # Estratégia A: Módulo moderno online_data (Instalações atualizadas)
                         try:
                             from pysus.online_data.SIH import download as download_sih_moderno
                             res = download_sih_moderno(state=uf, year=int(ano), month=int(m) if m else 0, group=sih_grupo)
                         except Exception as e_mod:
                             print(f"[SIH APIS] Avançando para Layout de Fallback Legado. Detalhe: {e_mod}")
                             
-                        # Estratégia B: Assinatura de métodos implícitos antigos se a moderna falhar
                         if res is None or (isinstance(res, list) and len(res) == 0):
                             combinacoes = [
                                 {"state": uf, "year": ano, "month": m, "group": sih_grupo},
@@ -385,6 +379,7 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                         if not isinstance(arquivos_norm, pd.DataFrame):
                             arquivos_norm = filtrar_arquivos_sih_exatos(arquivos_norm, uf, ano, m, sih_grupo)
                             
+                        # Correção unificada: Variável alterada de "archivos" para "arquivos"
                         df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
                             arquivos_norm, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado, prefixo_esperado=prefixo_token
                         )
@@ -436,7 +431,8 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                     sucessos_download += 1
                 else: falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO FINAL | {uf} {ano}")
             else:
-                if archivos_lidos > 0: falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO TERRITORIAL | {uf} {ano}")
+                # 🌟 SOLUÇÃO DO BUG: "archivos_lidos" alterado cirurgicamente para "arquivos_lidos"
+                if arquivos_lidos > 0: falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO TERRITORIAL | {uf} {ano}")
                 else: falhas.append(f"{sistema} FALHA DE DOWNLOAD OU ARQUIVO INEXISTENTE | {uf} {ano}")
         gc.collect()
             
@@ -619,7 +615,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
             submit_button = st.form_submit_button("🔍 Consultar Base")
 
         if submit_button:
-            # 🌟 MODIFICAÇÃO DINÂMICA: Trava do "Todos os Meses" só barra a Dengue no SINAN
             is_dengue = (sistema == "Notificações (SINAN)" and agravo_sel == "DENG")
             if mes_sel is None and (sistema in ["Internações (SIH)", "Cadastro Nacional de Estabelecimentos (CNES)"] or is_dengue):
                 st.error("Para SIH, CNES e SINAN (Dengue), selecione um mês específico. A opção 'Todos os Meses' foi liberada para os outros agravos leves do SINAN, mas permanece bloqueada nessas bases massivas para evitar estouro de RAM.")
@@ -741,6 +736,12 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     with c4:
                                         col_doenca = next((c for c in df_tratado.columns if "Causa Básica (CID-10)" in c), None)
                                         if col_doenca: st.bar_chart(df_tratado[col_doenca].value_counts().head(10))
+                                else:
+                                    c1, c2 = st.columns(2)
+                                    col_sexo = next((c for c in df_tratado.columns if "Sexo" in c), None)
+                                    if col_sexo: st.bar_chart(df_tratado[col_sexo].value_counts())
+                                    col_raca = next((c for c in df_tratado.columns if "Raça" in c), None)
+                                    if col_raca: st.bar_chart(df_tratado[col_raca].value_counts())
                     else:
                         msg = df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados disponíveis."
                         if "território, período ou agravo" in msg:
@@ -759,9 +760,9 @@ elif aba_ativa == "📚 Dicionários e Citações":
         * **ST - Estabelecimentos:** Apresenta dados cadastrais básicos de unidades. A contagem única pelo método `CNES.nunique()` reflete o quantitativo real de estabelecimentos.
         * **PF - Vínculos Profissionais:** Registra contratos profissional-estabelecimento. Representa o volume de vínculos ativos, não indivíduos físicos unificados.
         * **SR - Serviços Especializados:** Cadastro técnico de serviços de saúde. Não deve ser interpretado como indicador de atendimentos efetuados.
-        * **HB / IN:** Habilitações de alta complexidade e incentivos financeiros regulamentados. Não espelham valores líquidos repassados sem colunas de tesouraria explícitas.
+        * **HB / IN:** Habilitações de alta complexidade e incentivos financeiros regulamentados. Não espelham valores líquidos repassados sem colunas de tesouraria explícias.
         * **EP - Equipes:** Cadastro nominal de Equipes de Saúde da Família e correlatas (nomenclatura corrigida do PySUS).
-        * **EQ / LT - Equipamentos e Leitos:** Linhas de tabelas quantitativas. **Atenção:** A função `len(df)` monitora apenas o controle operacional das linhas. O total de itens instalados deve ser calculated pela consolidação da soma da coluna quantitativa `QT_EXIST`.
+        * **EQ / LT - Equipamentos e Leitos:** Linhas de tabelas quantitativas. **Atenção:** A função `len(df)` monitora apenas o controle operacional das linhas. O total de itens instalados deve ser calculado pela consolidação da soma da coluna quantitativa `QT_EXIST`.
         """)
 
     with st.expander("🛏️ SIH (Sistema de Informações Hospitalares)"):
