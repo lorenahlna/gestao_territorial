@@ -1,4 +1,4 @@
-# VERSAO_FINAL_PRODUCAO_CORRIGIDA_V11_SIH
+# VERSAO_FINAL_PRODUCAO_CORRIGIDA_V10
 import streamlit as st
 import pandas as pd
 import requests
@@ -115,67 +115,10 @@ def carregar_tabelas_complementares():
 
 TABELAS_EXTERNAS = carregar_tabelas_complementares()
 
-# --- IMPORTS PYSUS COM FALLBACK SEGURO ---
-# Algumas versões do PySUS expõem a API nova em pysus.api._impl.databases;
-# outras instalações ainda dependem dos módulos legacy em pysus.online_data.
-# Importar tudo em um único try/except fazia uma falha derrubar todos os sistemas.
-api_sim = api_sih = api_cnes = api_sinasc = api_sinan = api_list_files = None
-
 try:
-    from pysus.api._impl.databases import sim as api_sim
-except Exception as e:
-    print(f"[PYSUS IMPORT] API nova SIM indisponível: {repr(e)}")
-
-try:
-    from pysus.api._impl.databases import sih as api_sih
-except Exception as e:
-    print(f"[PYSUS IMPORT] API nova SIH indisponível: {repr(e)}")
-
-try:
-    from pysus.api._impl.databases import list_files as api_list_files
-except Exception as e:
-    print(f"[PYSUS IMPORT] API nova list_files indisponível: {repr(e)}")
-
-try:
-    from pysus.api._impl.databases import cnes as api_cnes
-except Exception as e:
-    print(f"[PYSUS IMPORT] API nova CNES indisponível: {repr(e)}")
-
-try:
-    from pysus.api._impl.databases import sinasc as api_sinasc
-except Exception as e:
-    print(f"[PYSUS IMPORT] API nova SINASC indisponível: {repr(e)}")
-
-try:
-    from pysus.api._impl.databases import sinan as api_sinan
-except Exception as e:
-    print(f"[PYSUS IMPORT] API nova SINAN indisponível: {repr(e)}")
-
-def pysus_sistema_disponivel(sistema):
-    """Verifica disponibilidade mínima do PySUS para o sistema solicitado."""
-    if "SIH" in sistema:
-        if api_sih is not None:
-            return True
-        try:
-            from pysus.online_data.SIH import download  # noqa: F401
-            return True
-        except Exception:
-            return False
-    if "SIM" in sistema:
-        return api_sim is not None
-    if "SINASC" in sistema:
-        return api_sinasc is not None
-    if "CNES" in sistema:
-        return api_cnes is not None
-    if "SINAN" in sistema:
-        if api_sinan is not None:
-            return True
-        try:
-            from pysus.online_data.SINAN import download  # noqa: F401
-            return True
-        except Exception:
-            return False
-    return False
+    from pysus.api._impl.databases import sim as api_sim, sih as api_sih, cnes as api_cnes, sinasc as api_sinasc, sinan as api_sinan
+except ImportError:
+    api_sim = api_sih = api_cnes = api_sinasc = api_sinan = None
 
 UFS = ["AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS","MG","PA","PB","PR","PE","PI","RJ","RN","RS","RO","RR","SC","SP","SE","TO"]
 ESTADOS_IBGE = {"AC": "12", "AL": "27", "AP": "16", "AM": "13", "BA": "29", "CE": "23", "DF": "53", "ES": "32", "GO": "52", "MA": "21", "MT": "51", "MS": "50", "MG": "31", "PA": "15", "PB": "25", "PR": "41", "PE": "26", "PI": "22", "RJ": "33", "RN": "24", "RS": "43", "RO": "11", "RR": "14", "SC": "42", "SP": "35", "SE": "28", "TO": "17"}
@@ -286,121 +229,6 @@ def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
         
     return selecionados
 
-def resultado_pysus_vazio(res):
-    """Retorna True quando o PySUS retornou objeto vazio sem dados baixáveis."""
-    if res is None:
-        return True
-    if isinstance(res, pd.DataFrame):
-        return res.empty
-    if isinstance(res, (list, tuple, set)):
-        return len(res) == 0
-    if isinstance(res, str):
-        return len(res.strip()) == 0
-    return False
-
-def consultar_catalogo_sih(uf, ano, mes, grupo):
-    """
-    Consulta o catálogo da API nova do PySUS antes do download.
-    Isso distingue 'arquivo inexistente/publicação ainda não disponível' de erro de rede/leitura.
-    """
-    if api_list_files is None:
-        return None, "api._impl.databases.list_files indisponível nesta instalação"
-    try:
-        df_catalogo = api_list_files(
-            dataset="sih",
-            state=str(uf).upper().strip(),
-            year=int(ano),
-            month=int(mes),
-            group=str(grupo).upper().strip()
-        )
-        if isinstance(df_catalogo, pd.DataFrame):
-            return df_catalogo, None
-        return None, f"list_files retornou objeto inesperado: {type(df_catalogo)}"
-    except Exception as e:
-        return None, f"list_files falhou: {repr(e)}"
-
-def baixar_sih_pysus(uf, ano, mes, grupo):
-    """
-    Baixa arquivos SIH de forma compatível com PySUS 2.x e com a API legacy.
-
-    Antes do download, consulta o catálogo quando a API nova está disponível.
-    Assim, o app consegue separar:
-    - arquivo ainda não publicado no DATASUS/PySUS;
-    - erro de rede/API;
-    - erro de leitura/filtro depois do download.
-    """
-    erros = []
-    uf = str(uf).upper().strip()
-    ano = int(ano)
-    mes = int(mes)
-    grupo = str(grupo).upper().strip()
-
-    if mes < 1 or mes > 12:
-        raise ValueError(f"Mês inválido para SIH: {mes}. Informe um mês entre 1 e 12.")
-
-    token = f"{grupo}{uf}{str(ano)[-2:]}{mes:02d}"
-
-    # Diagnóstico de disponibilidade sem baixar o arquivo.
-    df_catalogo, erro_catalogo = consultar_catalogo_sih(uf, ano, mes, grupo)
-    if erro_catalogo:
-        erros.append(f"catálogo SIH: {erro_catalogo}")
-    elif df_catalogo is not None and df_catalogo.empty:
-        erros.append(
-            f"catálogo SIH sem arquivo para {token}. "
-            "Isso normalmente indica mês/ano ainda não publicado ou grupo inexistente para esse recorte."
-        )
-    elif df_catalogo is not None and not df_catalogo.empty:
-        nomes = []
-        if "name" in df_catalogo.columns:
-            nomes = [str(x) for x in df_catalogo["name"].dropna().head(5).tolist()]
-        print(f"[SIH CATÁLOGO] {token}: {len(df_catalogo)} arquivo(s) encontrado(s). {nomes}")
-
-    # Tentativa 1: API nova do PySUS.
-    if api_sih is not None:
-        try:
-            res = api_sih(
-                state=uf,
-                year=ano,
-                month=mes,
-                group=grupo,
-                show_progress=False
-            )
-            if not resultado_pysus_vazio(res):
-                print(f"[SIH DOWNLOAD] Sucesso via api._impl.databases.sih | {token}")
-                return res
-            erros.append("api._impl.databases.sih retornou vazio")
-        except Exception as e:
-            erros.append(f"api._impl.databases.sih: {repr(e)}")
-    else:
-        erros.append("api._impl.databases.sih indisponível nesta instalação")
-
-    # Tentativa 2: API legacy usada pelos notebooks do repositório cartaproale/PySUS.
-    try:
-        from pysus.online_data.SIH import download as download_sih_legacy
-        res = download_sih_legacy(uf, ano, mes, grupo)
-
-        if resultado_pysus_vazio(res):
-            erros.append("online_data.SIH.download retornou vazio")
-        elif hasattr(res, "to_dataframe"):
-            df = res.to_dataframe()
-            if not resultado_pysus_vazio(df):
-                print(f"[SIH DOWNLOAD] Sucesso via online_data.SIH.download.to_dataframe | {token}")
-                return df
-            erros.append("online_data.SIH.download.to_dataframe retornou DataFrame vazio")
-        elif hasattr(res, "to_pandas"):
-            df = res.to_pandas()
-            if not resultado_pysus_vazio(df):
-                print(f"[SIH DOWNLOAD] Sucesso via online_data.SIH.download.to_pandas | {token}")
-                return df
-            erros.append("online_data.SIH.download.to_pandas retornou DataFrame vazio")
-        else:
-            print(f"[SIH DOWNLOAD] Sucesso via online_data.SIH.download | {token}")
-            return res
-    except Exception as e:
-        erros.append(f"online_data.SIH.download: {repr(e)}")
-
-    raise RuntimeError("Falha ao baixar SIH. Tentativas: " + " | ".join(erros))
-
 # --- MOTOR SEMÂNTICO E CONSULTAS DUCKDB ---
 def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado="Amostra limitada de microdados", prefixo_esperado=None):
     if cols_alvo is None: cols_alvo = []
@@ -409,13 +237,6 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
         if isinstance(res, pd.DataFrame):
             arquivos_lidos = 1
             return aplicar_filtros_imediato(res, sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos), arquivos_lidos
-
-        # Objetos retornados por pysus.online_data.SIH.download nos notebooks legacy.
-        if hasattr(res, "to_dataframe"):
-            arquivos_lidos = 1
-            return aplicar_filtros_imediato(res.to_dataframe(), sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos), arquivos_lidos
-
-        # Outros objetos conversíveis para pandas.
         if hasattr(res, "to_pandas"):
             arquivos_lidos = 1
             return aplicar_filtros_imediato(res.to_pandas(), sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos), arquivos_lidos
@@ -516,8 +337,7 @@ def gerar_metricas_cnes(df, grupo):
 
 # --- 🌟 CORREÇÃO DE PORTUNHOL APLICADA SUCESSO DE CABEÇALHOS NAS DUAS TRILHAS ---
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo="", tipo_resultado=""):
-    if not pysus_sistema_disponivel(sistema):
-        return pd.DataFrame({"Erro": [f"Biblioteca PySUS não detectada ou sem módulo disponível para {sistema}."]})
+    if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     partes_final = [] 
     meses_para_baixar = [mes_num] if mes_num else [None]
     cols_alvo = obter_colunas_municipio(sistema, sih_grupo)
@@ -535,22 +355,35 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                     if "SIH" in sistema:
                         prefixo_token = f"{sih_grupo}{uf}{str(ano)[-2:]}{int(m):02d}" if m else f"{sih_grupo}{uf}{str(ano)[-2:]}"
                         prefixo_token = prefixo_token.upper()
-
+                        
+                        res = None
                         try:
-                            res = baixar_sih_pysus(uf=uf, ano=ano, mes=m, grupo=sih_grupo)
-                        except Exception as e_sih:
-                            falhas.append(f"SIH FALHA REAL DE DOWNLOAD | {uf} {ano}/{m}: {repr(e_sih)}")
-                            print(f"[SIH ERRO DOWNLOAD] {uf} {ano}/{m} grupo {sih_grupo}: {repr(e_sih)}")
-                            continue
-
+                            from pysus.online_data.SIH import download as download_sih_moderno
+                            res = download_sih_moderno(state=uf, year=int(ano), month=int(m) if m else 0, group=sih_grupo)
+                        except Exception as e_mod:
+                            print(f"[SIH APIS] Avançando para Layout de Fallback Legado. Detalhe: {e_mod}")
+                            
+                        if res is None or (isinstance(res, list) and len(res) == 0):
+                            combinacoes = [
+                                {"state": uf, "year": ano, "month": m, "group": sih_grupo},
+                                {"state": uf, "year": ano, "month": m, "groups": [sih_grupo]}
+                            ]
+                            for kwargs in combinacoes:
+                                try:
+                                    if api_sih:
+                                        res = api_sih(**kwargs)
+                                        if res: break
+                                except: continue
+                        
                         arquivos_norm = normalizar_lista_arquivos_pysus(res)
                         if not isinstance(arquivos_norm, pd.DataFrame):
                             arquivos_norm = filtrar_arquivos_sih_exatos(arquivos_norm, uf, ano, m, sih_grupo)
-
+                            
+                        # Correção unificada: Variável alterada de "archivos" para "arquivos"
                         df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
                             arquivos_norm, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado, prefixo_esperado=prefixo_token
                         )
-
+                        
                     elif "CNES" in sistema:
                         prefixo_token = f"{cnes_grupo}{uf}{str(ano)[-2:]}{int(m):02d}".upper()
                         try: res = api_cnes(state=uf, year=ano, month=m, group=cnes_grupo)
@@ -604,22 +437,10 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
         gc.collect()
             
     if not partes_final:
-        detalhes = "\n".join(falhas[-12:]) if falhas else "Nenhuma falha interna registrada."
         if any("SEM REGISTROS" in f for f in falhas):
-            return pd.DataFrame({
-                "Erro": ["A base foi baixada corretamente, mas não há registros para o território, período ou filtro selecionado."],
-                "Detalhes": [detalhes]
-            })
-        elif any("catálogo SIH sem arquivo" in f or "retornou vazio" in f for f in falhas):
-            return pd.DataFrame({
-                "Erro": ["Arquivo SIH não encontrado para o grupo, UF, ano e mês selecionados. Verifique se o mês já foi publicado no DATASUS/PySUS."],
-                "Detalhes": [detalhes]
-            })
+            return pd.DataFrame({"Erro": ["A base foi baixada corretamente, mas não há registros para o território, período ou agravo selecionados."] })
         else:
-            return pd.DataFrame({
-                "Erro": ["Falha de conexão, download ou leitura no DATASUS/PySUS para os filtros selecionados."],
-                "Detalhes": [detalhes]
-            })
+            return pd.DataFrame({"Erro": ["Falha de conexão ou arquivo inexistente no DATASUS para os filtros selecionados."] })
     return pd.concat(partes_final, ignore_index=True)
 
 def decodificar_idade_datasus(valor):
@@ -923,16 +744,9 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     if col_raca: st.bar_chart(df_tratado[col_raca].value_counts())
                     else:
                         msg = df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados disponíveis."
-                        detalhes = ""
-                        if not df_bruto.empty and "Detalhes" in df_bruto.columns:
-                            detalhes = str(df_bruto["Detalhes"].iloc[0])
-                        if "território, período ou filtro" in msg or "território, período ou agravo" in msg:
-                            st.info("ℹ️ A consulta foi executada com sucesso, mas não foram encontrados registros para o território, período ou filtro selecionado.")
-                        else:
-                            st.error(msg)
-                        if detalhes:
-                            with st.expander("🔎 Detalhes técnicos da falha"):
-                                st.code(detalhes)
+                        if "território, período ou agravo" in msg:
+                            st.info("ℹ️ A consulta foi executada com sucesso, mas não foram encontrados registros de notificações para o agravo, território e período selecionados.")
+                        else: st.error(msg)
 
 # --- ABA DE DICIONÁRIOS E CITAÇÕES ---
 elif aba_ativa == "📚 Dicionários e Citações":
