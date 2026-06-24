@@ -1,6 +1,7 @@
 streamlit
 pandas
 requests
+duckdb
 PySUS==2.3.0
 fastparquet
 pyarrow
@@ -8,3 +9,4 @@ dbfread
 wget
 beautifulsoup4
 lxml
+urllib3
