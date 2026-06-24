@@ -1,4 +1,4 @@
-# VERSAO_FINAL_SIH_POLIMORFICO_HOMOLOGADA_V12
+# VERSAO_FINAL_SIH_RESTAURADA_HOMOLOGADA_V12
 import streamlit as st
 import pandas as pd
 import requests
@@ -424,7 +424,7 @@ def tratar_e_traduzir_df(df, sistema):
     df_tratado = df_tratado.rename(columns=cabecalhos.get(sigla_sistema, {}))
     return df_tratado
 
-# 🌟 CORREÇÃO CRÍTICA: TRATAMENTO POLIMÓRFICO COMPLETO DA COOPERAÇÃO ENTRE APIS DO SIH NO PYSUS
+# --- 🌟 RESTAURAÇÃO DA LÓGICA DE DOWNLOAD EM CASCATA POSICIONAL DO SIH ---
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo="", tipo_resultado=""):
     if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     partes_final = [] 
@@ -445,28 +445,20 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                         prefixo_token = f"{sih_grupo}{uf}{str(ano)[-2:]}{int(m):02d}" if m else f"{sih_grupo}{uf}{str(ano)[-2:]}"
                         prefixo_token = prefixo_token.upper()
                         
+                        # Restauração cirúrgica do bloco cascata Try/Except original funcional
                         res = None
-                        # Estratégia 1: Tenta primeiro a API impl estruturada via impl se disponível
                         try:
-                            if api_sih:
-                                res = api_sih(state=uf, year=int(ano), month=int(m) if m else 0, group=sih_grupo)
-                        except Exception as e_api:
-                            print(f"[SIH API_SIH EXCEÇÃO] {repr(e_api)}")
-                            
-                        # Estratégia 2: Fallback Robusto — Chamada posicional pura (download(uf, ano, mes, grupo))
-                        if res is None or (isinstance(res, list) and len(res) == 0):
+                            res = api_sih(state=uf, year=int(ano), month=int(m) if m else 0, groups=[sih_grupo])
+                        except Exception:
                             try:
-                                from pysus.online_data.SIH import download as download_sih_posicional
-                                res = download_sih_posicional(uf, int(ano), int(m) if m else 0, sih_grupo)
-                            except Exception as e_pos:
-                                print(f"[SIH POSICIONAL EXCEÇÃO] {repr(e_pos)}")
-                                # Margem cega: Última tentativa nomeada caso a instalação inverta assinaturas
+                                res = api_sih(state=uf, year=int(ano), month=int(m) if m else 0, group=sih_grupo)
+                            except Exception:
                                 try:
-                                    from pysus.online_data.SIH import download as download_sih_nomeado
-                                    res = download_sih_nomeado(state=uf, year=int(ano), month=int(m) if m else 0, group=sih_grupo)
-                                except: pass
+                                    res = api_sih(state=uf, year=int(ano), month=int(m) if m else 0)
+                                except Exception as e:
+                                    falhas.append(f"SIH FALHA DE DOWNLOAD | {uf} {ano}/{m}: {e}")
+                                    continue
                         
-                        # Tratamento polimórfico dos formatos de retorno antes de acionar DuckDB
                         if res is not None:
                             if hasattr(res, "to_dataframe"):
                                 try: res = res.to_dataframe()
@@ -475,7 +467,6 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                                 try: res = res.to_pandas()
                                 except: pass
 
-                        # Encaminha o objeto normalizado (seja DataFrame ou lista de caminhos)
                         if isinstance(res, pd.DataFrame):
                             df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
                                 res, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado, prefixo_esperado=prefixo_token
@@ -742,10 +733,16 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     with c4:
                                         col_doenca = next((c for c in df_tratado.columns if "Causa Básica (CID-10)" in c), None)
                                         if col_doenca: st.bar_chart(df_tratado[col_doenca].value_counts().head(10))
+                                else:
+                                    c1, c2 = st.columns(2)
+                                    col_sexo = next((c for c in df_tratado.columns if "Sexo" in c), None)
+                                    if col_sexo: st.bar_chart(df_tratado[col_sexo].value_counts())
+                                    col_raca = next((c for c in df_tratado.columns if "Raça" in c), None)
+                                    if col_raca: st.bar_chart(df_tratado[col_raca].value_counts())
                     else:
                         msg = df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados disponíveis."
                         if "território, período ou agravo" in msg:
-                            st.info("ℹ️ A consulta foi executada com sucesso, mas não foram encontrados registros de notificações para o agravo, território e período selecionados.")
+                            st.info("ℹbox A consulta foi executada com sucesso, mas não foram encontrados registros de notificações para o agravo, território e período selecionados.")
                         else: st.error(msg)
 
 # --- ABA DE DICIONÁRIOS E CITAÇÕES ---
@@ -756,27 +753,33 @@ elif aba_ativa == "📚 Dicionários e Citações":
     
     with st.expander("🏥 CNES (Cadastro Nacional de Estabelecimentos de Saúde)"):
         st.markdown("""
-        O CNES deve ser tratado estritamente como um cadastro de capacidade instalada de unidades federativas[cite: 25, 27].
-        * **ST - Estabelecimentos:** Apresenta dados cadastrais básicos de unidades[cite: 29]. A contagem única pelo método `CNES.nunique()` reflete o quantitativo real de estabelecimentos unificados[cite: 29].
-        * **PF - Vínculos Profissionais:** Registra contratos profissional-estabelecimento[cite: 29]. Representa o volume de vínculos ativos, não indivíduos físicos isolados[cite: 29].
-        * **SR - Serviços Especializados:** Cadastro técnico de serviços de saúde. Não deve ser interpretado como indicador de atendimentos efetuados[cite: 29].
-        * **HB / IN:** Habilitações de alta complexidade e incentivos financeiros regulamentados[cite: 29]. Não espelham valores líquidos repassados sem colunas de faturamento explícitas[cite: 29].
-        * **EP - Equipes:** Cadastro nominal de Equipes de Saúde da Família e correlatas (nomenclatura corrigida do PySUS)[cite: 29].
-        * **EQ / LT - Equipamentos e Leitos:** Linhas de tabelas quantitativas[cite: 29]. **Atenção:** A função `len(df)` monitora apenas o controle operacional das linhas[cite: 14, 29]. O total de itens instalados deve ser calculado pela consolidação da soma da coluna quantitativa `QT_EXIST`[cite: 29].
+        O CNES deve ser tratado estritamente como um cadastro de capacidade instalada de unidades federativas[cite: 25].
+        * **ST - Estabelecimentos (TB_ESTABELECIMENTO):** Apresenta dados cadastrais básicos de unidades[cite: 82, 618]. A contagem única pelo método `CNES.nunique()` reflete o quantitativo real de estabelecimentos unificados[cite: 29].
+        * **PF - Vínculos Profissionais (TB_CARGA_HORARIA_SUS):** Registra contratos profissional-estabelecimento usando `COD_CBO`[cite: 82, 132, 611]. Representa o volume de vínculos ativos, não indivíduos físicos isolados[cite: 29].
+        * **SR - Serviços Especializados (RL_ESTAB_SERV_CLASS):** Cadastro técnico de serviços de saúde. Não deve ser interpretado como indicador de atendimentos efetuados[cite: 29].
+        * **HB / IN (RL_ESTAB_SIPAC):** Habilitações de alta complexidade e incentivos financeiros regulamentados[cite: 82]. Não espelham valores líquidos repassados sem colunas de faturamento explícias[cite: 29].
+        * **EP - Equipes (TB_EQUIPE):** Cadastro nominal de Equipes de Saúde da Família e correlatas (nomenclatura corrigida do PySUS)[cite: 29, 82].
+        * **EQ / LT - Equipamentos e Leitos (RL_ESTAB_EQUIPAMENTO / RL_ESTAB_COMPLEMENTAR):** Linhas de tabelas quantitativas[cite: 82]. **Atenção:** A função `len(df)` monitora apenas o controle operacional das linhas[cite: 14]. O total de itens instalados deve ser calculado pela consolidação da soma da coluna quantitativa `QT_EXIST`[cite: 29, 30].
         """)
 
     with st.expander("🛏️ SIH (Sistema de Informações Hospitalares)"):
         st.markdown("""
-        O SIH atua como o sistema de registro de produção e faturamento hospitalar[cite: 25, 44]. Os grupos disponíveis possuem naturezas completamente distintas[cite: 13, 44]:
-        * **Grupo RD (AIH Reduzida):** É a tabela padrão-ouro para análise epidemiológica de internações no país[cite: 10, 46]. Cada linha representa uma internação de paciente que ocupou leito hospitalar[cite: 46].
-        * **Grupo SP (Serviços Profissionais):** Registra atos e procedimentos efetuados pelos profissionais de saúde vinculados ao faturamento hospitalar[cite: 46, 47]. Um único paciente pode gerar dezenas de linhas neste grupo[cite: 47]. **Nunca utilize a contagem de linhas do grupo SP como métrica de internações**, sob risco de erro metodológico grave de superestimação[cite: 11, 47].
+        O SIH atua como o sistema de registro de produção e faturamento hospitalar[cite: 25]. Os grupos disponíveis possuem naturezas completamente distintas:
+        * **Grupo RD (AIH Reduzida):** É a tabela padrão-ouro para análise epidemiológica de internações no país[cite: 10, 46]. Cada linha representa uma internação consolidada e efetiva de paciente que ocupou leito hospitalar[cite: 46].
+        * **Grupo SP (Serviços Profissionais):** Registra atos e procedimentos efetuados pelos profissionais de saúde vinculados ao faturamento hospitalar[cite: 46]. Um único paciente pode gerar dezenas de linhas neste grupo[cite: 47]. **Nunca utilize a contagem de linhas do grupo SP como métrica de internações**, sob risco de erro metodológico grave de superestimativa[cite: 11, 47].
         * **Grupo ER (Emergência Referenciada):** Grupo técnico contendo fluxos específicos e dados de rejeições hospitalares com erros operacionais, mantido sob caráter de análise experimental[cite: 12, 46].
-        * **Grupo CM (Cirurgias Ambulatoriais):** Fluxo não geral que agrupa cirurgias de curtíssima permanência[cite: 46]. Devido ao limbo de faturamento, hospitais preferem reportar esses procedimentos no **SIA (Sistema Ambulatorial)**. Logo, possui subnotificação endêmica e está desativado para o fluxo mensal comum por UF nesta versão[cite: 46, 58].
+        * **Grupo CM (Cirurgias Ambulatoriais):** Fluxo não geral que agrupa cirurgias de curtíssima permanência[cite: 46]. Devido ao limbo de faturamento, hospitais preferem reportar esses procedimentos no **SIA (Sistema Ambulatorial)**. Logo, possui subnotificação endêmica e está desativado para o fluxo mensal comum por UF nesta versão[cite: 46].
+        
+        **Campos Estruturais Mapeados (PCDaS / Fiocruz & Base dos Dados):**
+        * `N_AIH`: Número identificador nacional único da Autorização de Internação Hospitalar[cite: 80, 621].
+        * `MUNIC_RES` / `MUNIC_MOV`: Município de residência do paciente e município de movimentação da unidade hospitalar[cite: 80, 621].
+        * `VAL_SH` / `VAL_SP` / `VAL_TOT`: Divisão operacional de custos hospitalares. `VAL_SH` (Serviços Hospitalares), `VAL_SP` (Serviços Profissionais) e `VAL_TOT` (Valor total repassado de faturamento)[cite: 80, 621].
+        * `UTI_MES_TO`: Quantidade consolidada de diárias em leito de Unidade de Terapia Intensiva no mês de competência faturado[cite: 80, 621].
         """)
 
     with st.expander("💀 SIM (Sistema de Informações sobre Mortalidade)"):
         st.markdown("""
-        * **Resumo:** Registros de óbitos com campos demográficos e causas de morte codificadas por CID-10[cite: 622, 634].
+        * **Resumo:** Registros de óbitos com campos demográficos e causas de morte codificadas por CID-10[cite: 622].
         * **CAUSABAS:** A causa básica do óbito (CID-10), crucial para análises de mortalidade[cite: 622, 635].
         """)
         
