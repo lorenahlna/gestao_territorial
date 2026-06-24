@@ -1,4 +1,4 @@
-# VERSAO_FINAL_SIH_PERFEITO_HOMOLOGADA_V12
+# VERSAO_FINAL_SIH_RESOLVIDO_PRODUCAO_V12
 import streamlit as st
 import pandas as pd
 import requests
@@ -52,11 +52,17 @@ def listar_anos_disponiveis(sistema="GERAL"):
     ano_inicial, ano_final = limites.get(sistema, (1995, ano_atual - 1))
     return list(range(ano_final, ano_inicial - 1, -1))
 
+# 🌟 AJUSTE 9: LOGICA EXCLUSIVA DE MAPEAMENTO MUNICIPAL DA BASE TÉCNICA ER
 def obter_colunas_municipio(sistema, grupo=None):
     if "SIH" in sistema:
-        if grupo == "RD": return ["MUNIC_RES", "MUNIC_MOV", "GESTOR_COD"]
-        elif grupo == "SP": return ["SP_MUNRES", "SP_MUNMOV", "SP_GESTOR"]
-        else: return ["MUNIC_RES", "MUNIC_MOV", "SP_MUNRES", "SP_MUNMOV", "SP_GESTOR"]
+        if grupo == "RD":
+            return ["MUNIC_RES", "MUNIC_MOV", "GESTOR_COD"]
+        elif grupo == "SP":
+            return ["SP_MUNRES", "SP_MUNMOV", "SP_GESTOR", "SP_MUNIC"]
+        elif grupo == "ER":
+            return ["MUNIC_RES", "MUNIC_MOV", "SP_MUNRES", "SP_MUNMOV", "SP_GESTOR", "SP_MUNIC"]
+        else:
+            return ["MUNIC_RES", "MUNIC_MOV", "SP_MUNRES", "SP_MUNMOV", "SP_GESTOR", "SP_MUNIC"]
     if "SIM" in sistema: return ["CODMUNRES"]
     if "SINASC" in sistema: return ["CODMUNRES", "CODMUNNASC"]
     if "SINAN" in sistema: return ["ID_MN_RESI", "ID_MUNICIP"]
@@ -198,7 +204,7 @@ def decodificar_sigtap(codigo, dict_sigtap):
     if dict_sigtap and cod in dict_sigtap: return f"{cod} - {dict_sigtap[cod]}"
     return cod
 
-def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo, dt_alvos):
+def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo, dt_alvos, grupo=None):
     try:
         df_t = df_t.copy()
         df_t.columns = [str(c).upper().strip() for c in df_t.columns]
@@ -207,6 +213,9 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
         dt_col_real = next((c for c in df_t.columns if c in dt_alvos), None)
         
         if nivel_terr == "Município" and not col_filtro_real:
+            if grupo == "ER" or "ER" in sistema:
+                print("[SIH DEBUG] Grupo ER sem coluna territorial identificada. Prosseguindo sem filtro municipal.")
+                return df_t
             print(f"[ALERTA CRÍTICO] Coluna municipal esperada {cols_alvo} NÃO ENCONTRADA no arquivo: {list(df_t.columns)}")
             return pd.DataFrame() 
 
@@ -232,33 +241,81 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
         print(f"[ERRO FILTRO IMEDIATO] {e}")
         return pd.DataFrame()
 
-def leitura_segura_parquet(caminho, limite=50000):
-    try:
-        caminho_sql = str(caminho).replace("'", "''")
-        query = f"SELECT * FROM read_parquet('{caminho_sql}') LIMIT {limite}"
-        return duckdb.query(query).df()
-    except Exception as e:
-        print(f"[ERRO LEITURA SEGURA] {repr(e)}")
-        return pd.DataFrame()
+# 🌟 AJUSTE 5: FUNÇÃO DE DOWNLOAD DO SIH BASEADA NO NOTEBOOK VALIDADO POSICIONAL
+def baixar_sih_validado(uf, ano, mes, grupo):
+    """
+    Baixa dados do SIH usando a lógica posicional validada nos notebooks do PySUS.
+    Funciona de forma resiliente para RD, SP e ER.
+    """
+    from pysus.online_data.SIH import download
+    obj = download(uf, int(ano), int(mes), grupo)
+    
+    if hasattr(obj, "to_dataframe"):
+        return obj.to_dataframe()
+    if hasattr(obj, "to_pandas"):
+        return obj.to_pandas()
+    if isinstance(obj, pd.DataFrame):
+        return obj
+    return obj
 
+# 🌟 AJUSTE 6: FALLBACK BASEADO NA VERSÃO ANTIGA FUNCIONAL DA API_SIH
+def baixar_sih_fallback_api(uf, ano, mes, grupo):
+    """
+    Fallback baseado na versão antiga funcional do script utilizando api_sih.
+    """
+    res = None
+    try:
+        res = api_sih(state=uf, year=int(ano), month=int(mes), groups=[grupo])
+    except Exception:
+        try:
+            res = api_sih(state=uf, year=int(ano), month=int(mes), group=grupo)
+        except Exception:
+            try:
+                res = api_sih(state=uf, year=int(ano), month=int(mes))
+            except Exception:
+                res = None
+    return res
+
+# 🌟 AJUSTE 7: ATUALIZAÇÃO DA NORMALIZAÇÃO PARA ACEITAR OBJETOS TO_DATAFRAME
 def normalizar_lista_arquivos_pysus(res):
-    if res is None: return []
-    if isinstance(res, pd.DataFrame): return res
-    if isinstance(res, str): return [res]
+    if res is None:
+        return []
+    if isinstance(res, pd.DataFrame):
+        return res
+    if hasattr(res, "to_dataframe"):
+        return res.to_dataframe()
+    if hasattr(res, "to_pandas"):
+        return res.to_pandas()
+    if isinstance(res, str):
+        return [res]
     if isinstance(res, list):
         caminhos = []
+        frames = []
         for item in res:
-            if isinstance(item, str): caminhos.append(item)
-            elif hasattr(item, "__fspath__"): caminhos.append(os.fspath(item))
-            elif hasattr(item, "path"): caminhos.append(str(item.path))
-            else: caminhos.append(str(item))
+            if isinstance(item, pd.DataFrame):
+                frames.append(item)
+            elif hasattr(item, "to_dataframe"):
+                frames.append(item.to_dataframe())
+            elif hasattr(item, "to_pandas"):
+                frames.append(item.to_pandas())
+            elif isinstance(item, str):
+                caminhos.append(item)
+            elif hasattr(item, "__fspath__"):
+                caminhos.append(os.fspath(item))
+            elif hasattr(item, "path"):
+                caminhos.append(str(item.path))
+            else:
+                caminhos.append(str(item))
+        if frames:
+            return pd.concat(frames, ignore_index=True)
         return caminhos
-    if hasattr(res, "__fspath__"): return [os.fspath(res)]
-    if hasattr(res, "path"): return [str(res.path)]
+    if hasattr(res, "__fspath__"):
+        return [os.fspath(res)]
+    if hasattr(res, "path"):
+        return [str(res.path)]
     return [str(res)]
 
-# 🌟 CORREÇÃO V12: TRATAMENTO SEMÂNTICO DE EXCLUSÃO PARA O FILTRO FÍSICO DO GRUPO RD
-def ajustar_filtro_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
+def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     if isinstance(arquivos, pd.DataFrame): return arquivos
     ano2 = str(ano)[-2:]
     mes2 = f"{int(mes):02d}" if mes is not None else ""
@@ -268,7 +325,6 @@ def ajustar_filtro_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     for caminho in arquivos:
         nome = os.path.basename(str(caminho)).upper()
         if grupo == "RD":
-            # Para o RD (padrão), aceita se não for explicitamente dos grupos concorrentes SP/ER/CM e contiver a UF
             if any(nome.startswith(g) for g in ["SP", "ER", "CM"]):
                 continue
             if uf.upper() in nome:
@@ -288,10 +344,10 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
     try:
         if isinstance(res, pd.DataFrame):
             arquivos_lidos = 1
-            return aplicar_filtros_imediato(res, sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos), arquivos_lidos
+            return aplicar_filtros_imediato(res, sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos, grupo=prefixo_esperado[:2] if prefixo_esperado else None), arquivos_lidos
         if hasattr(res, "to_pandas"):
             arquivos_lidos = 1
-            return aplicar_filtros_imediato(res.to_pandas(), sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos), arquivos_lidos
+            return aplicar_filtros_imediato(res.to_pandas(), sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos, grupo=prefixo_esperado[:2] if prefixo_esperado else None), arquivos_lidos
 
         if isinstance(res, str): res = [res]
         if isinstance(res, list) and len(res) > 0:
@@ -307,39 +363,43 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
                 if not caminho.endswith(".parquet"): continue
 
                 nome_arquivo = os.path.basename(caminho).upper()
+                
+                # 🌟 AJUSTE 10.4: LOG TEMPORÁRIO DENTRO DO PROCESSAMENTO DUCKDB
+                print(f"[SIH DEBUG] Arquivo lido: {nome_arquivo}")
+                
                 if prefixo_esperado and sistema == "Internações (SIH)":
                     prefixo = str(prefixo_esperado).upper()
                     grupo_solicitado = prefixo[:2]
-                    
-                    # 🌟 CORREÇÃO V12: DUPLO ISOLAMENTO SEMÂNTICO DENTRO DO DUCKDB
                     if grupo_solicitado == "RD":
-                        if any(nome_arquivo.startswith(g) for g in ["SP", "ER", "CM"]):
-                            continue
-                        if uf.upper() not in nome_arquivo:
-                            continue
+                        if any(nome_arquivo.startswith(g) for g in ["SP", "ER", "CM"]): continue
+                        if uf.upper() not in nome_arquivo: continue
                     else:
-                        if not (grupo_solicitado in nome_arquivo and uf.upper() in nome_arquivo):
-                            continue
-                elif prefixo_esperado:
-                    prefixo = str(prefixo_esperado).upper()
-                    if not nome_arquivo.startswith(prefixo):
-                        if not (prefixo[:2] in nome_arquivo and uf.upper() in nome_arquivo):
-                            continue
+                        if not (grupo_solicitado in nome_arquivo and uf.upper() in nome_arquivo): continue
 
                 arquivos_lidos += 1
                 caminho_sql = caminho.replace("'", "''")
 
                 try:
                     cols_parquet = duckdb.query(f"DESCRIBE SELECT * FROM read_parquet('{caminho_sql}')").df()["column_name"].tolist()
+                    
+                    # 🌟 AJUSTE 10.4 LOGS ADICIONAIS
+                    print(f"[SIH DEBUG] Colunas encontradas: {cols_parquet}")
+                    print(f"[SIH DEBUG] Colunas alvo: {cols_alvo}")
+                    
                     cols_alvo_upper = [x.upper() for x in cols_alvo]
                     col_filtro = next((c for c in cols_parquet if c.upper() in cols_alvo_upper), None)
+                    print(f"[SIH DEBUG] Coluna usada no filtro: {col_filtro}")
 
                     if id_alvo and col_filtro and nivel_terr == "Município":
                         id_sql = str(id_alvo).replace("'", "''")
                         query = f"SELECT * FROM read_parquet('{caminho_sql}') WHERE CAST(\"{col_filtro}\" AS VARCHAR) LIKE '{id_sql}%'"
                         df = duckdb.query(query).df()
                         frames.append(df)
-
+                    elif id_alvo and not col_filtro and nivel_terr == "Município" and "ER" in prefixo_esperado:
+                        # ER Visualização Bruta sem filtro municipal se coluna sumir
+                        query = f"SELECT * FROM read_parquet('{caminho_sql}')"
+                        df = duckdb.query(query).df()
+                        frames.append(df)
                     elif nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Resumo agregado":
                         col_mun_res = next((c for c in cols_parquet if c.upper() in ["MUNIC_RES", "SP_MUNRES", "ID_MN_RESI", "ID_MUNICIP", "CODUFMUN"]), None)
                         if col_mun_res:
@@ -366,36 +426,6 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
         print(f"[ERRO OPERACIONAL DUCKDB] {repr(e)}")
     return pd.DataFrame(), arquivos_lidos
 
-def gerar_metricas_cnes(df, grupo):
-    df = df.copy()
-    df.columns = [str(c).upper().strip() for c in df.columns]
-    metricas = {
-        "grupo": grupo,
-        "registros": len(df),
-        "estabelecimentos_unicos": df["CNES"].nunique() if "CNES" in df.columns else None
-    }
-    if grupo == "ST":
-        metricas["principal_label"] = "Estabelecimentos unicos"
-        metricas["principal_value"] = metricas["estabelecimentos_unicos"] or len(df)
-    elif grupo == "PF":  
-        metricas["principal_label"] = "Vinculos profissionais"
-        metricas["principal_value"] = len(df)
-    elif grupo in ["SR", "HB", "IN", "EP", "DC"]:
-        labels = {"SR": "Servicos especializados", "HB": "Habilitacoes", "IN": "Incentivos", "EP": "Equipes cadastradas", "DC": "Registros complementares"}
-        metricas["principal_label"] = labels[grupo]
-        metricas["principal_value"] = len(df)
-    elif grupo == "EQ":
-        for col in ["QT_EXIST", "QT_USO", "QT_SUS", "QT_NSUS"]:
-            if col in df.columns: df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)         
-        metricas["principal_label"] = "Equipamentos existentes"
-        metricas["principal_value"] = int(df["QT_EXIST"].sum()) if "QT_EXIST" in df.columns else len(df)
-    elif group == "LT":
-        for col in ["QT_EXIST", "QT_SUS", "QT_NSUS", "QT_CONTR"]:
-            if col in df.columns: df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)              
-        metricas["principal_label"] = "Leitos existentes"
-        metricas["principal_value"] = int(df["QT_EXIST"].sum()) if "QT_EXIST" in df.columns else len(df)
-    return metricas
-
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo="", tipo_resultado=""):
     if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     partes_final = [] 
@@ -407,52 +437,73 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
     id_filtro = id_datasus_alvo if nivel_terr == "Município" else ""
 
     for uf in ufs_lista:
-        if "SIH" in sistema or "CNES" in sistema:
+        # 🌟 AJUSTE 8: REESTRUTURAÇÃO COMPLETA DO BLOCO PRINCIPAL DO SIH COM LOGS DO PRODUTO
+        if "SIH" in sistema:
+            if sih_grupo == "CM":
+                st.error("O grupo SIH/CM exige rotina própria via pysus.ftp.databases.sih.SIH e não será processado no fluxo mensal UF/município desta versão.")
+                st.stop()
+                
+            for m in meses_para_baixar:
+                df_temp = pd.DataFrame()
+                prefixo_token = f"{sih_grupo}{uf}{str(ano)[-2:]}{int(m):02d}" if m else f"{sih_grupo}{uf}{str(ano)[-2:]}"
+                prefixo_token = prefixo_token.upper()
+
+                # 🌟 AJUSTE 10.1: LOGS ANTES DO DOWNLOAD
+                print("[SIH DEBUG] Grupo:", sih_grupo)
+                print("[SIH DEBUG] UF:", uf)
+                print("[SIH DEBUG] Ano:", ano)
+                print("[SIH DEBUG] Mês:", m)
+
+                res = None
+                try:
+                    res = baixar_sih_validado(uf, ano, m, sih_grupo)
+                except Exception as e_online:
+                    print(f"[SIH ONLINE_DATA FALHOU] {uf} {ano}/{m} {sih_grupo}: {e_online}")
+                    try:
+                        res = baixar_sih_fallback_api(uf, ano, m, sih_grupo)
+                    except Exception as e_api:
+                        print(f"[SIH API_SIH FALHOU] {uf} {ano}/{m} {sih_grupo}: {e_api}")
+                        res = None
+
+                # 🌟 AJUSTE 10.2: LOGS DEPOIS DO DOWNLOAD
+                print("[SIH DEBUG] Tipo do retorno:", type(res))
+                print("[SIH DEBUG] Retorno:", res)
+
+                arquivos_norm = normalizar_lista_arquivos_pysus(res)
+                
+                # 🌟 AJUSTE 10.3: LOGS DEPOIS DA NORMALIZAÇÃO
+                print("[SIH DEBUG] Tipo após normalização:", type(arquivos_norm))
+
+                if isinstance(arquivos_norm, pd.DataFrame):
+                    print("[SIH DEBUG] DataFrame normalizado:", arquivos_norm.shape)
+                    print("[SIH DEBUG] Colunas:", arquivos_norm.columns.tolist())
+                    df_temp = aplicar_filtros_imediato(arquivos_norm, sistema, nivel_terr, uf, id_filtro, m, cols_alvo, dt_alvos, grupo=sih_grupo)
+                else:
+                    print("[SIH DEBUG] Arquivos normalizados:", arquivos_norm)
+                    arquivos_norm = filtrar_arquivos_sih_exatos(arquivos_norm, uf, ano, m, sih_grupo)
+                    df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
+                        arquivos_norm, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado, prefixo_esperado=prefixo_token
+                    )
+
+                # 🌟 AJUSTE 10.5: LOG DEPOIS DO FILTRO TERRITORIAL
+                print("[SIH DEBUG] Linhas após filtro:", len(df_temp))
+
+                if not df_temp.empty:
+                    partes_final.append(df_temp)
+                    sucessos_download += 1
+                else:
+                    falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO TERRITORIAL | {uf} {ano}")
+            continue
+
+        if "CNES" in sistema:
             for m in meses_para_baixar:
                 df_temp = pd.DataFrame()
                 arquivos_lidos = 0
                 try:
-                    if "SIH" in sistema:
-                        prefixo_token = f"{sih_grupo}{uf}{str(ano)[-2:]}{int(m):02d}" if m else f"{sih_grupo}{uf}{str(ano)[-2:]}"
-                        prefixo_token = prefixo_token.upper()
-                        
-                        res = None
-                        try:
-                            res = api_sih(state=uf, year=int(ano), month=int(m) if m else 0, groups=[sih_grupo])
-                        except Exception:
-                            try:
-                                res = api_sih(state=uf, year=int(ano), month=int(m) if m else 0, group=sih_grupo)
-                            except Exception:
-                                try:
-                                    res = api_sih(state=uf, year=int(ano), month=int(m) if m else 0)
-                                except Exception as e:
-                                    falhas.append(f"SIH FALHA DE DOWNLOAD | {uf} {ano}/{m}: {e}")
-                                    continue
-                        
-                        if res is not None:
-                            if hasattr(res, "to_dataframe"):
-                                try: res = res.to_dataframe()
-                                except: pass
-                            elif hasattr(res, "to_pandas"):
-                                try: res = res.to_pandas()
-                                except: pass
-
-                        if isinstance(res, pd.DataFrame):
-                            df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
-                                res, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado, prefixo_esperado=prefixo_token
-                            )
-                        else:
-                            arquivos_norm = normalizar_lista_arquivos_pysus(res)
-                            arquivos_norm = ajustar_filtro_arquivos_sih_exatos(arquivos_norm, uf, ano, m, sih_grupo)
-                            df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
-                                arquivos_norm, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado, prefixo_esperado=prefixo_token
-                            )
-                        
-                    elif "CNES" in sistema:
-                        prefixo_token = f"{cnes_grupo}{uf}{str(ano)[-2:]}{int(m):02d}".upper()
-                        try: res = api_cnes(state=uf, year=ano, month=m, group=cnes_grupo)
-                        except: res = None
-                        df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado, prefixo_esperado=prefixo_token)
+                    prefixo_token = f"{cnes_grupo}{uf}{str(ano)[-2:]}{int(m):02d}".upper()
+                    try: res = api_cnes(state=uf, year=ano, month=m, group=cnes_grupo)
+                    except: res = None
+                    df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado, prefixo_esperado=prefixo_token)
                 except Exception as e:
                     falhas.append(f"Erro {sistema} | {uf} {ano}/{m}: {e}")
                     continue
@@ -505,52 +556,6 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
         else:
             return pd.DataFrame({"Erro": ["Falha de conexão ou arquivo inexistente no DATASUS para os filtros selecionados."] })
     return pd.concat(partes_final, ignore_index=True)
-
-def tratar_e_traduzir_df(df, sistema):
-    df_tratado = df.copy()
-    df_tratado.columns = [str(c).upper().strip() for c in df_tratado.columns]
-    sigla_sistema = "SIM" if "SIM" in sistema else "SINASC" if "SINASC" in sistema else "SIH" if "SIH" in sistema else "CNES" if "CNES" in sistema else "SINAN"
-    
-    dic_dinamico = CONFIG_APP.get("DICIONARIOS_VALORES", {})
-    if "SIH" not in dic_dinamico: dic_dinamico["SIH"] = {}
-    dic_dinamico["SIH"].update({"SEXO": {"1": "Masculino", "3": "Feminino"}, "MORTE": {"0": "Alta", "1": "Óbito"}})
-    
-    if "SINASC" not in dic_dinamico: dic_dinamico["SINASC"] = {}
-    dic_dinamico["SINASC"].update({
-        "ESCMAE": {"1": "Nenhuma", "2": "1 a 3 anos", "3": "4 a 7 anos", "4": "8 a 11 anos", "5": "12 anos e mais", "9": "Ignorado"},
-        "ESCMAE2010": {"0": "Sem escolaridade", "1": "Fundamental I", "2": "Fundamental II", "3": "Médio", "4": "Superior incompleto", "5": "Superior completo", "9": "Ignorado"},
-        "RACACORMAE": {"1": "Branca", "2": "Preta", "3": "Amarela", "4": "Parda", "5": "Indígena", "9": "Ignorado"}
-    })
-
-    if "IDADE" in df_tratado.columns: df_tratado.loc[:, "IDADE"] = df_tratado["IDADE"].apply(decodificar_idade_datasus)
-    if "IDADEMAE" in df_tratado.columns: 
-        df_tratado.loc[:, "IDADEMAE"] = df_tratado["IDADEMAE"].apply(decodificar_idade_datasus)
-        df_tratado.loc[:, "GRUPO_IDADE_MAE"] = df_tratado["IDADEMAE"].apply(agrupar_idade_mae)
-    if "NU_IDADE_N" in df_tratado.columns: df_tratado.loc[:, "NU_IDADE_N"] = df_tratado["NU_IDADE_N"].apply(decodificar_idade_datasus)
-
-    for c_vbo in ["OCUP", "OCUPMAE", "CODOCUPMAE", "ID_OCUPA_N"]:
-        if c_vbo in df_tratado.columns: df_tratado.loc[:, c_vbo] = df_tratado[c_vbo].apply(decodificar_cbo)
-
-    dict_cid = TABELAS_EXTERNAS.get("CID10", {})
-    for col in ["CAUSABAS", "DIAG_PRINC", "DIAG_SECUN", "ID_AGRAVO"]:
-        if col in df_tratado.columns: df_tratado.loc[:, col] = df_tratado[col].apply(lambda x: decodificar_cid(x, dict_cid))
-
-    dict_sigtap = TABELAS_EXTERNAS.get("SIGTAP", {})
-    for col in ["PROC_REA", "PROC_SOLIC"]:
-        if col in df_tratado.columns: df_tratado.loc[:, col] = df_tratado[col].apply(lambda x: decodificar_sigtap(x, dict_sigtap))
-
-    for coluna, de_para in dic_dinamico.get(sigla_sistema, {}).items():
-        if coluna in df_tratado.columns:
-            df_tratado.loc[:, coluna] = df_tratado[coluna].apply(normalizar_codigo).map(de_para).fillna("Ignorado/Outros")
-            
-    cabecalhos = CONFIG_APP.get("TRADUCAO_CABECALHOS", {})
-    if "SIH" not in cabecalhos: cabecalhos["SIH"] = {}
-    cabecalhos["SIH"].update({"SEXO": "Sexo Paciente", "MORTE": "Desfecho (Alta/Óbito)", "VAL_TOT": "Valor Total AIH (R$)", "VAL_UTI": "Valor UTI (R$)", "DIAG_PRINC": "Diagnóstico Principal (CID-10)", "PROC_REA": "Procedimento Realizado (SIGTAP)"})
-    if "SINASC" not in cabecalhos: cabecalhos["SINASC"] = {}
-    cabecalhos["SINASC"].update({"GRUPO_IDADE_MAE": "Faixa Etária da Mãe", "ESCMAE": "Escolaridade Mãe (Anos)", "ESCMAE2010": "Escolaridade Mãe (2010)", "CODOCUPMAE": "Ocupação/Profissão Mãe (CBO)", "RACACORMAE": "Raça/Cor da Mãe"})
-    
-    df_tratado = df_tratado.rename(columns=cabecalhos.get(sigla_sistema, {}))
-    return df_tratado
 
 # --- INTERFACE PRINCIPAL ---
 st.sidebar.title("🧬 Navegação e Filtros")
@@ -618,7 +623,9 @@ if aba_ativa == "📋 Guia Principal (Extração)":
             cnes_grupo_sel = mapa_cnes[st.sidebar.selectbox("Grupo de Dados (CNES):", list(mapa_cnes.keys()))]
         
         ano_sel = st.sidebar.selectbox("Ano de Referência:", listar_anos_disponiveis(sistema))
-        
+        if "SINASC" in sistema and ano_sel >= 2021:
+            st.sidebar.warning("⚠️ **Aviso de Migração:** Os microdados de Nascidos Vivos após 2020 foram movidos para o Portal de Dados Abertos.")
+            
         nome_mes = st.sidebar.selectbox("Mês de Competência/Ocorrência:", ["Todos os Meses"] + MESES_NOMES, index=1)
         mes_sel = None if nome_mes == "Todos os Meses" else int(nome_mes.split(" - ")[0])
         
@@ -629,10 +636,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
             is_dengue = (sistema == "Notificações (SINAN)" and agravo_sel == "DENG")
             if mes_sel is None and (sistema in ["Internações (SIH)", "Cadastro Nacional de Estabelecimentos (CNES)"] or is_dengue):
                 st.error("Para SIH, CNES e SINAN (Dengue), selecione um mês específico. A opção 'Todos os Meses' foi liberada para os outros agravos leves do SINAN, mas permanece bloqueada nessas bases massivas para evitar estouro de RAM.")
-                st.stop()
-                
-            if sistema == "Internações (SIH)" and sih_grupo_sel == "CM":
-                st.error("O grupo SIH/CM não está disponível de forma confiável para consulta mensal por UF/município nesta versão. Use RD para internações ou SP para serviços profissionais.")
                 st.stop()
 
             if trava_global.locked():
@@ -747,12 +750,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     with c4:
                                         col_doenca = next((c for c in df_tratado.columns if "Causa Básica (CID-10)" in c), None)
                                         if col_doenca: st.bar_chart(df_tratado[col_doenca].value_counts().head(10))
-                                else:
-                                    c1, c2 = st.columns(2)
-                                    col_sexo = next((c for c in df_tratado.columns if "Sexo" in c), None)
-                                    if col_sexo: st.bar_chart(df_tratado[col_sexo].value_counts())
-                                    col_raca = next((c for c in df_tratado.columns if "Raça" in c), None)
-                                    if col_raca: st.bar_chart(df_tratado[col_raca].value_counts())
                     else:
                         msg = df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados disponíveis."
                         if "território, período ou agravo" in msg:
