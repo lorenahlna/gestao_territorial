@@ -252,18 +252,16 @@ def leitura_segura_parquet(caminho, limite=50000):
 # 🌟 LÓGICAS VALIDADAS DE DOWNLOAD E CONVERSÃO SIH
 def baixar_sih_validado(uf, ano, mes, grupo):
     """
-    Baixa dados do SIH usando a lógica validada nos notebooks do PySUS.
-    Funciona para RD, SP e ER via parâmetros posicionais diretos.
+    Baixa dados do SIH usando a chamada posicional validada nos notebooks.
+
+    IMPORTANTE:
+    Não converte imediatamente para DataFrame.
+    O PySUS normalmente retorna uma lista de objetos ParquetData; preservar o caminho
+    local do Parquet permite que o DuckDB faça leitura, filtro municipal e agregação
+    estadual sem carregar a base inteira em memória.
     """
     from pysus.online_data.SIH import download
-    obj = download(uf, int(ano), int(mes), grupo)
-    if hasattr(obj, "to_dataframe"):
-        return obj.to_dataframe()
-    if hasattr(obj, "to_pandas"):
-        return obj.to_pandas()
-    if isinstance(obj, pd.DataFrame):
-        return obj
-    return obj
+    return download(uf, int(ano), int(mes), grupo)
 
 def baixar_sih_fallback_api(uf, ano, mes, grupo):
     """
@@ -283,48 +281,97 @@ def baixar_sih_fallback_api(uf, ano, mes, grupo):
     return res
 
 def normalizar_lista_arquivos_pysus(res):
-    if res is None: return []
-    if isinstance(res, pd.DataFrame): return res
-    if hasattr(res, "to_dataframe"): return res.to_dataframe()
-    if hasattr(res, "to_pandas"): return res.to_pandas()
-    if isinstance(res, str): return [res]
+    """
+    Normaliza os retornos possíveis do PySUS.
+
+    Regra crítica para SIH:
+    - se houver caminho de arquivo Parquet, preservar o caminho;
+    - converter para DataFrame apenas quando não houver caminho local.
+
+    Isso evita carregar RD/SP completos em memória e mantém a trilha DuckDB ativa.
+    """
+    if res is None:
+        return []
+
+    if isinstance(res, pd.DataFrame):
+        return res
+
+    if isinstance(res, str):
+        return [res]
+
+    if hasattr(res, "__fspath__"):
+        return [os.fspath(res)]
+
+    if hasattr(res, "path"):
+        return [str(res.path)]
+
     if isinstance(res, list):
         caminhos = []
         frames = []
         for item in res:
-            if isinstance(item, pd.DataFrame): frames.append(item)
-            elif hasattr(item, "to_dataframe"): frames.append(item.to_dataframe())
-            elif hasattr(item, "to_pandas"): frames.append(item.to_pandas())
-            elif isinstance(item, str): caminhos.append(item)
-            elif hasattr(item, "__fspath__"): caminhos.append(os.fspath(item))
-            elif hasattr(item, "path"): caminhos.append(str(item.path))
-            else: caminhos.append(str(item))
-        if frames: return pd.concat(frames, ignore_index=True)
-        return caminhos
-    if hasattr(res, "__fspath__"): return [os.fspath(res)]
-    if hasattr(res, "path"): return [str(res.path)]
-    return [str(res)]
+            if item is None:
+                continue
+            if isinstance(item, pd.DataFrame):
+                frames.append(item)
+            elif isinstance(item, str):
+                caminhos.append(item)
+            elif hasattr(item, "__fspath__"):
+                caminhos.append(os.fspath(item))
+            elif hasattr(item, "path"):
+                caminhos.append(str(item.path))
+            elif hasattr(item, "to_dataframe"):
+                frames.append(item.to_dataframe())
+            elif hasattr(item, "to_pandas"):
+                frames.append(item.to_pandas())
+            else:
+                texto_item = str(item)
+                if texto_item.endswith(".parquet"):
+                    caminhos.append(texto_item)
+
+        if caminhos:
+            return caminhos
+        if frames:
+            return pd.concat(frames, ignore_index=True)
+        return []
+
+    if hasattr(res, "to_dataframe"):
+        return res.to_dataframe()
+
+    if hasattr(res, "to_pandas"):
+        return res.to_pandas()
+
+    texto_res = str(res)
+    if texto_res.endswith(".parquet"):
+        return [texto_res]
+    return []
 
 def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
-    if isinstance(arquivos, pd.DataFrame): return arquivos
+    if isinstance(arquivos, pd.DataFrame):
+        return arquivos
+
     ano2 = str(ano)[-2:]
     mes2 = f"{int(mes):02d}" if mes is not None else ""
     prefixo_exato = f"{grupo}{uf}{ano2}{mes2}".upper()
-    
+
     selecionados = []
+    outros_grupos = [g for g in ["RD", "SP", "ER", "CM", "RJ", "CH"] if g != grupo]
+
     for caminho in arquivos:
         nome = os.path.basename(str(caminho)).upper()
-        if grupo == "RD":
-            if any(nome.startswith(g) for g in ["SP", "ER", "CM"]):
-                continue
-            if uf.upper() in nome:
-                selecionados.append(caminho)
-        else:
-            if nome.startswith(prefixo_exato) or (grupo.upper() in nome and uf.upper() in nome):
-                selecionados.append(caminho)
-                
-    if not selecionados and arquivos:
-        return arquivos
+
+        # Se o arquivo possui nome DATASUS clássico, filtra com precisão.
+        if nome.startswith(prefixo_exato):
+            selecionados.append(caminho)
+            continue
+
+        # Se está claro que é outro grupo SIH, rejeita.
+        if any(nome.startswith(g) for g in outros_grupos):
+            continue
+
+        # Em algumas versões/cache do PySUS o nome local pode não carregar UF/ano/mês.
+        # Nesse caso, não rejeitar: o próprio download já foi solicitado para UF/ano/mês/grupo.
+        selecionados.append(caminho)
+
     return selecionados
 
 # --- MOTOR SEMÂNTICO E CONSULTAS DUCKDB ---
@@ -334,7 +381,37 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
     try:
         if isinstance(res, pd.DataFrame):
             arquivos_lidos = 1
-            return aplicar_filtros_imediato(res, sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos, grupo=prefixo_esperado[:2] if prefixo_esperado else None), arquivos_lidos
+            df_res = aplicar_filtros_imediato(
+                res, sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos,
+                grupo=prefixo_esperado[:2] if prefixo_esperado else None
+            )
+
+            if (
+                nivel_terr == "Estado"
+                and sistema in BASES_PESADAS
+                and tipo_resultado == "Resumo agregado"
+                and not df_res.empty
+            ):
+                cols_upper = [str(c).upper().strip() for c in df_res.columns]
+                mapa_cols = dict(zip(cols_upper, df_res.columns))
+                col_mun = next(
+                    (mapa_cols[c] for c in ["MUNIC_RES", "SP_MUNRES", "MUNIC_MOV", "SP_MUNMOV", "ID_MN_RESI", "ID_MUNICIP", "CODUFMUN"] if c in mapa_cols),
+                    None
+                )
+                if col_mun:
+                    agg = (
+                        df_res.groupby(col_mun, dropna=False)
+                        .size()
+                        .reset_index(name="TOTAL_REGISTROS")
+                        .rename(columns={col_mun: "CODIGO_MUNICIPIO"})
+                        .sort_values("TOTAL_REGISTROS", ascending=False)
+                    )
+                    return agg, arquivos_lidos
+
+            if nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Amostra limitada de microdados":
+                df_res = df_res.head(50000).copy()
+
+            return df_res, arquivos_lidos
 
         if isinstance(res, str): res = [res]
         if isinstance(res, list) and len(res) > 0:
@@ -355,11 +432,13 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
                 if prefixo_esperado and sistema == "Internações (SIH)":
                     prefixo = str(prefixo_esperado).upper()
                     grupo_solicitado = prefixo[:2]
-                    if grupo_solicitado == "RD":
-                        if any(nome_arquivo.startswith(g) for g in ["SP", "ER", "CM"]): continue
-                        if uf.upper() not in nome_arquivo: continue
-                    else:
-                        if not (grupo_solicitado in nome_arquivo and uf.upper() in nome_arquivo): continue
+                    outros_grupos = [g for g in ["RD", "SP", "ER", "CM", "RJ", "CH"] if g != grupo_solicitado]
+
+                    # Só rejeita quando o próprio nome deixa claro que é outro grupo.
+                    # Não exigir UF no nome, pois caches diferentes do PySUS podem salvar o Parquet
+                    # com nomes internos sem o prefixo DATASUS clássico.
+                    if any(nome_arquivo.startswith(g) for g in outros_grupos):
+                        continue
 
                 arquivos_lidos += 1
                 caminho_sql = caminho.replace("'", "''")
@@ -695,7 +774,13 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                     if not df_bruto.empty and "Erro" not in df_bruto.columns:
                         if nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Resumo agregado":
                             df_tratado = df_bruto.copy()
-                            df_tratado.columns = ["CÓDIGO_MUNICÍPIO_RESIDENTE", "TOTAL_DE_REGISTROS"]
+                            if len(df_tratado.columns) == 2:
+                                df_tratado.columns = ["CÓDIGO_MUNICÍPIO_RESIDENTE", "TOTAL_DE_REGISTROS"]
+                            else:
+                                st.warning(
+                                    "A consulta retornou microdados em vez de resumo agregado. "
+                                    "A visualização foi preservada sem renomear colunas para evitar erro de dimensões."
+                                )
                             sistema_titulo = f"Resumo Agregado — {sistema}"
                         else:
                             df_tratado = tratar_e_traduzir_df(df_bruto, sistema)
