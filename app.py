@@ -1,9 +1,11 @@
-# VERSAO_FINAL_SIH_RESTAURADO_E_BLINDADO_V14
+# VERSAO_V18_SIH_DOWNLOAD_DIRETO_DATASUS
 import streamlit as st
 import pandas as pd
 import requests
 import io
 import urllib3
+import urllib.request
+import socket
 import gc
 import os
 import threading
@@ -54,10 +56,14 @@ def listar_anos_disponiveis(sistema="GERAL"):
 
 def obter_colunas_municipio(sistema, grupo=None):
     if "SIH" in sistema:
-        if grupo == "RD": return ["MUNIC_RES", "MUNIC_MOV", "GESTOR_COD"]
-        elif grupo == "SP": return ["SP_MUNRES", "SP_MUNMOV", "SP_GESTOR", "SP_MUNIC"]
-        elif grupo == "ER": return ["MUNIC_RES", "MUNIC_MOV", "SP_MUNRES", "SP_MUNMOV", "SP_GESTOR", "SP_MUNIC", "CO_ERRO"]
-        else: return ["MUNIC_RES", "MUNIC_MOV", "SP_MUNRES", "SP_MUNMOV", "SP_GESTOR", "SP_MUNIC"]
+        if grupo == "RD":
+            return ["MUNIC_RES", "MUNIC_MOV", "GESTOR_COD"]
+        elif grupo == "SP":
+            return ["SP_MUNRES", "SP_MUNMOV", "SP_GESTOR", "SP_MUNIC"]
+        elif grupo == "ER":
+            return ["MUNIC_RES", "MUNIC_MOV", "SP_MUNRES", "SP_MUNMOV", "SP_GESTOR", "SP_MUNIC", "CO_ERRO"]
+        else:
+            return ["MUNIC_RES", "MUNIC_MOV", "SP_MUNRES", "SP_MUNMOV", "SP_GESTOR", "SP_MUNIC"]
     if "SIM" in sistema: return ["CODMUNRES"]
     if "SINASC" in sistema: return ["CODMUNRES", "CODMUNNASC"]
     if "SINAN" in sistema: return ["ID_MN_RESI", "ID_MUNICIP"]
@@ -116,10 +122,18 @@ def carregar_tabelas_complementares():
 
 TABELAS_EXTERNAS = carregar_tabelas_complementares()
 
+# PySUS 2.3+ documenta a API publica em `pysus.api`.
+# Mantemos fallback para `_impl.databases` apenas para ambientes antigos.
+PY_SUS_API_ORIGEM = "indisponivel"
 try:
-    from pysus.api._impl.databases import sim as api_sim, sih as api_sih, cnes as api_cnes, sinasc as api_sinasc, sinan as api_sinan
-except ImportError:
-    api_sim = api_sih = api_cnes = api_sinasc = api_sinan = None
+    from pysus.api import sim as api_sim, sih as api_sih, cnes as api_cnes, sinasc as api_sinasc, sinan as api_sinan
+    PY_SUS_API_ORIGEM = "pysus.api"
+except Exception:
+    try:
+        from pysus.api._impl.databases import sim as api_sim, sih as api_sih, cnes as api_cnes, sinasc as api_sinasc, sinan as api_sinan
+        PY_SUS_API_ORIGEM = "pysus.api._impl.databases"
+    except Exception:
+        api_sim = api_sih = api_cnes = api_sinasc = api_sinan = None
 
 UFS = ["AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS","MG","PA","PB","PR","PE","PI","RJ","RN","RS","RO","RR","SC","SP","SE","TO"]
 ESTADOS_IBGE = {"AC": "12", "AL": "27", "AP": "16", "AM": "13", "BA": "29", "CE": "23", "DF": "53", "ES": "32", "GO": "52", "MA": "21", "MT": "51", "MS": "50", "MG": "31", "PA": "15", "PB": "25", "PR": "41", "PE": "26", "PI": "22", "RJ": "33", "RN": "24", "RS": "43", "RO": "11", "RR": "14", "SC": "42", "SP": "35", "SE": "28", "TO": "17"}
@@ -245,58 +259,421 @@ def leitura_segura_parquet(caminho, limite=50000):
         print(f"[ERRO LEITURA SEGURA] {repr(e)}")
         return pd.DataFrame()
 
+# 🌟 LÓGICAS VALIDADAS DE DOWNLOAD E CONVERSÃO SIH
+
+SIH_GRUPOS_ARQUIVO = ("RD", "SP", "ER", "CM", "RJ", "CH")
+
+def extrair_caminhos_retorno_sih(res):
+    """
+    Extrai caminhos de arquivo do retorno do PySUS sem converter ParquetSet para DataFrame.
+    Isso permite validar se o arquivo baixado corresponde ao grupo/UF/ano/mes solicitados.
+    """
+    if res is None:
+        return []
+    itens = res if isinstance(res, (list, tuple, set)) else [res]
+    caminhos = []
+    for item in itens:
+        if item is None:
+            continue
+        if isinstance(item, str):
+            caminhos.append(item)
+        elif hasattr(item, "__fspath__"):
+            caminhos.append(os.fspath(item))
+        elif hasattr(item, "path"):
+            caminhos.append(str(item.path))
+        else:
+            texto = str(item)
+            if ".parquet" in texto.lower():
+                caminhos.append(texto)
+    return caminhos
+
+def classificar_nome_arquivo_sih(caminho, uf, ano, mes, grupo):
+    """
+    Retorna True se o nome DATASUS bate exatamente com grupo/UF/ano/mes.
+    Retorna False se o nome parece ser SIH classico, mas de outro grupo/UF/ano/mes.
+    Retorna None quando o nome local nao permite validar com seguranca.
+    """
+    nome = os.path.basename(str(caminho)).upper()
+    nome_sem_ext = os.path.splitext(nome)[0]
+    ano2 = str(int(ano))[-2:]
+    mes2 = f"{int(mes):02d}"
+    prefixo_exato = f"{grupo}{uf}{ano2}{mes2}".upper()
+
+    if nome_sem_ext.startswith(prefixo_exato):
+        return True
+
+    # Padrao classico DATASUS para SIH: GRUPO + UF + AA + MM, por exemplo RDMG2501.
+    if len(nome_sem_ext) >= 8:
+        grupo_nome = nome_sem_ext[:2]
+        uf_nome = nome_sem_ext[2:4]
+        aa_mm = nome_sem_ext[4:8]
+        if grupo_nome in SIH_GRUPOS_ARQUIVO and uf_nome.isalpha() and aa_mm.isdigit():
+            return False
+
+    return None
+
+def dataframe_parece_grupo_sih(df, grupo):
+    """
+    Valida superficialmente o grupo quando o retorno ja veio como DataFrame.
+    Nao tenta ser exaustivo; serve apenas para evitar aceitar SP quando foi solicitado RD.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return False
+    cols = {str(c).upper().strip() for c in df.columns}
+    if grupo == "RD":
+        return bool(cols.intersection({"MUNIC_RES", "MUNIC_MOV", "N_AIH", "DIAG_PRINC", "VAL_TOT"})) and not all(c.startswith("SP_") for c in cols if c)
+    if grupo == "SP":
+        return bool(cols.intersection({"SP_MUNRES", "SP_MUNMOV", "SP_GESTOR", "SP_NAIH", "SP_PROCREA"}))
+    if grupo == "ER":
+        return bool(cols.intersection({"CO_ERRO", "MUNIC_RES", "MUNIC_MOV", "SP_NAIH"}))
+    return True
+
+def retorno_sih_valido_para_solicitacao(res, uf, ano, mes, grupo, nome_tentativa=""):
+    """
+    Garante que um retorno nao vazio corresponde ao grupo/UF/ano/mes solicitados.
+    Corrige o bug em que a chamada `groups=[RD]` retornava, por exemplo, SPMG2601.parquet
+    para uma consulta RD/MG/2025/01, e o app aceitava esse retorno como sucesso.
+    """
+    if not retorno_pysus_tem_conteudo(res):
+        return False
+
+    caminhos = extrair_caminhos_retorno_sih(res)
+    if caminhos:
+        classificados = [classificar_nome_arquivo_sih(c, uf, ano, mes, grupo) for c in caminhos]
+        if any(v is True for v in classificados):
+            return True
+        if any(v is False for v in classificados):
+            print(
+                f"[SIH DEBUG] Retorno rejeitado por arquivo divergente em {nome_tentativa}. "
+                f"Esperado {grupo}{uf}{str(int(ano))[-2:]}{int(mes):02d}. Recebido: {caminhos[:3]}"
+            )
+            return False
+        # Sem nome classico validavel: aceita e deixa o processamento posterior decidir.
+        return True
+
+    if isinstance(res, pd.DataFrame):
+        ok = dataframe_parece_grupo_sih(res, grupo)
+        if not ok:
+            print(f"[SIH DEBUG] DataFrame rejeitado: colunas nao parecem do grupo {grupo}. Colunas: {list(res.columns)[:20]}")
+        return ok
+
+    if isinstance(res, (list, tuple, set)):
+        frames = [x for x in res if isinstance(x, pd.DataFrame)]
+        if frames:
+            return any(dataframe_parece_grupo_sih(df, grupo) for df in frames)
+
+    return True
+
+def baixar_sih_validado(uf, ano, mes, grupo):
+    """
+    Baixa dados do SIH usando a chamada posicional validada nos notebooks.
+
+    IMPORTANTE:
+    Não converte imediatamente para DataFrame.
+    O PySUS normalmente retorna uma lista de objetos ParquetData; preservar o caminho
+    local do Parquet permite que o DuckDB faça leitura, filtro municipal e agregação
+    estadual sem carregar a base inteira em memória.
+    """
+    from pysus.online_data.SIH import download
+    return download(uf, int(ano), int(mes), grupo)
+
+def baixar_sih_direto_datasus(uf, ano, mes, grupo):
+    """
+    Fallback independente do modulo `pysus.online_data` e da camada ducklake/api_sih.
+
+    Monta explicitamente o arquivo DATASUS esperado, por exemplo RDMG2603.dbc,
+    baixa do FTP/HTTPS oficial do DATASUS, converte DBC para DataFrame com pyreaddbc
+    e grava Parquet local para manter a leitura eficiente via DuckDB.
+    """
+    grupo = str(grupo).upper().strip()
+    uf = str(uf).upper().strip()
+    ano2 = str(int(ano))[-2:]
+    mes2 = f"{int(mes):02d}"
+    base = f"{grupo}{uf}{ano2}{mes2}"
+
+    cache_dir = os.path.join(os.path.expanduser("~"), "pysus", "downloads", "datasus_direto", "sih")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    dbc_path = os.path.join(cache_dir, f"{base}.dbc")
+    parquet_path = os.path.join(cache_dir, f"{base}.parquet")
+
+    if os.path.exists(parquet_path) and os.path.getsize(parquet_path) > 0:
+        print(f"[SIH DEBUG] Usando parquet direto em cache: {parquet_path}")
+        return [parquet_path]
+
+    urls = [
+        f"https://ftp.datasus.gov.br/dissemin/publicos/SIHSUS/200801_/Dados/{base}.dbc",
+        f"ftp://ftp.datasus.gov.br/dissemin/publicos/SIHSUS/200801_/Dados/{base}.dbc",
+    ]
+
+    ultimo_erro = None
+    baixou = os.path.exists(dbc_path) and os.path.getsize(dbc_path) > 0
+
+    if not baixou:
+        for url in urls:
+            try:
+                print(f"[SIH DEBUG] Tentando download direto DATASUS: {url}")
+                if url.startswith("https://"):
+                    r = requests.get(url, timeout=90, verify=False, headers={"User-Agent": "Mozilla/5.0"})
+                    if r.status_code != 200 or len(r.content) < 1024:
+                        raise RuntimeError(f"HTTP {r.status_code}; tamanho={len(r.content)}")
+                    with open(dbc_path, "wb") as f:
+                        f.write(r.content)
+                else:
+                    timeout_antigo = socket.getdefaulttimeout()
+                    socket.setdefaulttimeout(90)
+                    try:
+                        urllib.request.urlretrieve(url, dbc_path)
+                    finally:
+                        socket.setdefaulttimeout(timeout_antigo)
+
+                if os.path.exists(dbc_path) and os.path.getsize(dbc_path) > 1024:
+                    baixou = True
+                    break
+                raise RuntimeError("arquivo DBC não foi gravado ou ficou vazio")
+            except Exception as e:
+                ultimo_erro = e
+                try:
+                    if os.path.exists(dbc_path) and os.path.getsize(dbc_path) == 0:
+                        os.remove(dbc_path)
+                except Exception:
+                    pass
+
+    if not baixou:
+        raise RuntimeError(f"Arquivo {base}.dbc não encontrado/baixado no DATASUS. Último erro: {repr(ultimo_erro)}")
+
+    try:
+        import pyreaddbc
+    except Exception as e:
+        raise RuntimeError(
+            "O fallback direto baixou o DBC, mas o pacote pyreaddbc não está disponível. "
+            "Inclua `pyreaddbc` no requirements.txt ou use uma imagem com PySUS 2.3+ completo. "
+            f"Erro: {repr(e)}"
+        )
+
+    print(f"[SIH DEBUG] Convertendo DBC direto para DataFrame: {dbc_path}")
+    df = pyreaddbc.read_dbc(dbc_path, encoding="iso-8859-1")
+    if df is None or df.empty:
+        raise RuntimeError(f"Arquivo {base}.dbc foi baixado, mas a conversão retornou DataFrame vazio")
+
+    df.columns = [str(c).upper().strip() for c in df.columns]
+    try:
+        df.to_parquet(parquet_path, index=False)
+    except Exception as e_parquet:
+        print(f"[SIH DEBUG] pandas.to_parquet falhou; tentando gravar via DuckDB. Erro: {repr(e_parquet)}")
+        conn = duckdb.connect(database=":memory:")
+        try:
+            conn.register("sih_df_tmp", df)
+            parquet_sql = parquet_path.replace("'", "''")
+            conn.execute(f"COPY sih_df_tmp TO '{parquet_sql}' (FORMAT PARQUET)")
+        finally:
+            try:
+                conn.unregister("sih_df_tmp")
+            except Exception:
+                pass
+            conn.close()
+    print(f"[SIH DEBUG] Parquet direto gravado: {parquet_path} | linhas={len(df)}")
+    del df
+    gc.collect()
+    return [parquet_path]
+
+def baixar_sih_fallback_api(uf, ano, mes, grupo):
+    """
+    Caminho principal para SIH conforme documentacao PySUS 2.3+:
+        from pysus.api import sih
+        sih(state="SP", year=2024, month=1, group="RD")
+
+    Observacao: `group` e singular na API documentada. `groups` fica apenas como
+    compatibilidade para instalacoes antigas. Evitamos chamada sem grupo para nao
+    baixar grupo diferente do solicitado.
+    """
+    tentativas = []
+
+    if api_sih is None:
+        return None
+
+    mes_int = int(mes)
+    ano_int = int(ano)
+
+    chamadas = [
+        ("api_sih documentada group/mes_int", {"state": uf, "year": ano_int, "month": mes_int, "group": grupo}),
+        ("api_sih documentada group/mes_lista", {"state": uf, "year": ano_int, "month": [mes_int], "group": grupo}),
+        ("api_sih compat groups/mes_int", {"state": uf, "year": ano_int, "month": mes_int, "groups": [grupo]}),
+        ("api_sih compat groups/mes_lista", {"state": uf, "year": ano_int, "month": [mes_int], "groups": [grupo]}),
+    ]
+
+    # A chamada sem grupo so e segura para RD, pois RD costuma ser o padrao.
+    # Para SP/ER, chamada sem grupo pode retornar outro grupo e mascarar o erro.
+    if grupo == "RD":
+        chamadas.extend([
+            ("api_sih sem grupo RD/mes_int", {"state": uf, "year": ano_int, "month": mes_int}),
+            ("api_sih sem grupo RD/mes_lista", {"state": uf, "year": ano_int, "month": [mes_int]}),
+        ])
+
+    for nome, kwargs in chamadas:
+        try:
+            res = api_sih(**kwargs)
+            if retorno_sih_valido_para_solicitacao(res, uf, ano, mes, grupo, nome):
+                print(f"[SIH DEBUG] Download OK via {nome} | origem={PY_SUS_API_ORIGEM}")
+                return res
+            tentativas.append(f"{nome}: retorno vazio ou arquivo divergente")
+        except Exception as e:
+            tentativas.append(f"{nome}: {repr(e)}")
+
+    print("[SIH DEBUG] api_sih sem retorno util:", " | ".join(tentativas))
+    return None
+
+def retorno_pysus_tem_conteudo(res):
+    """
+    Distingue falha/vazio real de retorno valido do PySUS.
+    Isso e critico porque algumas chamadas retornam [] sem excecao; nesse caso
+    precisamos tentar outro metodo em vez de informar 'sem registros'.
+    """
+    if res is None:
+        return False
+    if isinstance(res, pd.DataFrame):
+        return not res.empty
+    if isinstance(res, str):
+        return bool(res.strip())
+    if isinstance(res, (list, tuple, set)):
+        return len(res) > 0
+    try:
+        if hasattr(res, "__len__"):
+            return len(res) > 0
+    except Exception:
+        pass
+    # Objetos ParquetSet/ParquetData podem nao expor len, mas ainda assim serem validos.
+    if any(hasattr(res, attr) for attr in ["to_dataframe", "to_pandas", "path", "__fspath__"]):
+        return True
+    return True
+
+
+def baixar_sih_robusto(uf, ano, mes, grupo):
+    """
+    Baixa SIH com validação estrita do arquivo esperado.
+
+    Ordem:
+    1) API pública/interna do PySUS, mas só aceita se o arquivo bater exatamente.
+    2) Fallback direto DATASUS: baixa RDUFAAAMM.dbc/SPUFAAAMM.dbc etc., converte para parquet.
+    3) Fallback legado online_data apenas se o módulo existir.
+    """
+    erros = []
+
+    # 1) API PySUS documentada/interna. Pode retornar arquivo divergente em algumas versões/cache.
+    try:
+        res = baixar_sih_fallback_api(uf, ano, mes, grupo)
+        if retorno_sih_valido_para_solicitacao(res, uf, ano, mes, grupo, "api_sih"):
+            return res, "api_sih validado"
+        erros.append("api_sih: retorno vazio ou arquivo divergente")
+    except Exception as e:
+        erros.append(f"api_sih: {repr(e)}")
+
+    # 2) Fallback principal para este bug: arquivo DATASUS exato por nome.
+    try:
+        res = baixar_sih_direto_datasus(uf, ano, mes, grupo)
+        if retorno_sih_valido_para_solicitacao(res, uf, ano, mes, grupo, "download direto DATASUS"):
+            return res, "download direto DATASUS validado"
+        erros.append("download direto DATASUS: retorno vazio ou arquivo divergente")
+    except Exception as e:
+        erros.append(f"download direto DATASUS: {repr(e)}")
+
+    # 3) Fallback opcional para instalações antigas que ainda possuem pysus.online_data.
+    try:
+        res = baixar_sih_validado(uf, ano, mes, grupo)
+        if retorno_sih_valido_para_solicitacao(res, uf, ano, mes, grupo, "online_data.SIH posicional"):
+            return res, "online_data.SIH posicional validado"
+        erros.append("online_data.SIH posicional: retorno vazio ou arquivo divergente")
+    except Exception as e:
+        erros.append(f"online_data.SIH posicional: {repr(e)}")
+
+    raise RuntimeError("Nenhum metodo de download SIH retornou dados uteis. " + " | ".join(erros))
+
 def normalizar_lista_arquivos_pysus(res):
-    if res is None: return []
-    if isinstance(res, pd.DataFrame): return res
-    if hasattr(res, "to_dataframe"): 
-        try: return res.to_dataframe()
-        except: pass
-    if hasattr(res, "to_pandas"): 
-        try: return res.to_pandas()
-        except: pass
-    if isinstance(res, str): return [res]
+    """
+    Normaliza os retornos possíveis do PySUS.
+
+    Regra crítica para SIH:
+    - se houver caminho de arquivo Parquet, preservar o caminho;
+    - converter para DataFrame apenas quando não houver caminho local.
+
+    Isso evita carregar RD/SP completos em memória e mantém a trilha DuckDB ativa.
+    """
+    if res is None:
+        return []
+
+    if isinstance(res, pd.DataFrame):
+        return res
+
+    if isinstance(res, str):
+        return [res]
+
+    if hasattr(res, "__fspath__"):
+        return [os.fspath(res)]
+
+    if hasattr(res, "path"):
+        return [str(res.path)]
+
     if isinstance(res, list):
         caminhos = []
         frames = []
         for item in res:
-            if isinstance(item, pd.DataFrame): frames.append(item)
-            elif hasattr(item, "to_dataframe"): 
-                try: frames.append(item.to_dataframe())
-                except: pass
-            elif hasattr(item, "to_pandas"): 
-                try: frames.append(item.to_pandas())
-                except: pass
-            elif isinstance(item, str): caminhos.append(item)
-            elif hasattr(item, "__fspath__"): caminhos.append(os.fspath(item))
-            elif hasattr(item, "path"): caminhos.append(str(item.path))
-            else: caminhos.append(str(item))
-        if frames: return pd.concat(frames, ignore_index=True)
-        return caminhos
-    if hasattr(res, "__fspath__"): return [os.fspath(res)]
-    if hasattr(res, "path"): return [str(res.path)]
-    return [str(res)]
+            if item is None:
+                continue
+            if isinstance(item, pd.DataFrame):
+                frames.append(item)
+            elif isinstance(item, str):
+                caminhos.append(item)
+            elif hasattr(item, "__fspath__"):
+                caminhos.append(os.fspath(item))
+            elif hasattr(item, "path"):
+                caminhos.append(str(item.path))
+            elif hasattr(item, "to_dataframe"):
+                frames.append(item.to_dataframe())
+            elif hasattr(item, "to_pandas"):
+                frames.append(item.to_pandas())
+            else:
+                texto_item = str(item)
+                if texto_item.endswith(".parquet"):
+                    caminhos.append(texto_item)
+
+        if caminhos:
+            return caminhos
+        if frames:
+            return pd.concat(frames, ignore_index=True)
+        return []
+
+    if hasattr(res, "to_dataframe"):
+        return res.to_dataframe()
+
+    if hasattr(res, "to_pandas"):
+        return res.to_pandas()
+
+    texto_res = str(res)
+    if texto_res.endswith(".parquet"):
+        return [texto_res]
+    return []
 
 def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
-    if isinstance(arquivos, pd.DataFrame): return arquivos
-    ano2 = str(ano)[-2:]
-    mes2 = f"{int(mes):02d}" if mes is not None else ""
-    prefixo_exato = f"{grupo}{uf}{ano2}{mes2}".upper()
-    
-    selecionados = []
-    for caminho in arquivos:
-        nome = os.path.basename(str(caminho)).upper()
-        if grupo == "RD":
-            if any(nome.startswith(g) for g in ["SP", "ER", "CM", "RJ", "CH"]):
-                continue
-            if uf.upper() in nome:
-                selecionados.append(caminho)
-        else:
-            if nome.startswith(prefixo_exato) or (grupo.upper() in nome and uf.upper() in nome):
-                selecionados.append(caminho)
-                
-    if not selecionados and arquivos:
+    if isinstance(arquivos, pd.DataFrame):
         return arquivos
-    return selecionados
+
+    selecionados = []
+    indefinidos = []
+    esperados = f"{grupo}{uf}{str(int(ano))[-2:]}{int(mes):02d}".upper() if mes is not None else f"{grupo}{uf}{str(int(ano))[-2:]}".upper()
+
+    for caminho in arquivos:
+        status = classificar_nome_arquivo_sih(caminho, uf, ano, mes, grupo) if mes is not None else None
+        if status is True:
+            selecionados.append(caminho)
+        elif status is None:
+            # Nome local nao classico; manter como contingencia.
+            indefinidos.append(caminho)
+        else:
+            print(f"[SIH DEBUG] Arquivo SIH descartado por divergencia. Esperado {esperados}; recebido {os.path.basename(str(caminho)).upper()}")
+
+    if selecionados:
+        return selecionados
+    return indefinidos
 
 # --- MOTOR SEMÂNTICO E CONSULTAS DUCKDB ---
 def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado="Amostra limitada de microdados", prefixo_esperado=None):
@@ -305,7 +682,37 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
     try:
         if isinstance(res, pd.DataFrame):
             arquivos_lidos = 1
-            return aplicar_filtros_imediato(res, sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos, grupo=prefixo_esperado[:2] if prefixo_esperado else None), arquivos_lidos
+            df_res = aplicar_filtros_imediato(
+                res, sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo, dt_alvos,
+                grupo=prefixo_esperado[:2] if prefixo_esperado else None
+            )
+
+            if (
+                nivel_terr == "Estado"
+                and sistema in BASES_PESADAS
+                and tipo_resultado == "Resumo agregado"
+                and not df_res.empty
+            ):
+                cols_upper = [str(c).upper().strip() for c in df_res.columns]
+                mapa_cols = dict(zip(cols_upper, df_res.columns))
+                col_mun = next(
+                    (mapa_cols[c] for c in ["MUNIC_RES", "SP_MUNRES", "MUNIC_MOV", "SP_MUNMOV", "ID_MN_RESI", "ID_MUNICIP", "CODUFMUN"] if c in mapa_cols),
+                    None
+                )
+                if col_mun:
+                    agg = (
+                        df_res.groupby(col_mun, dropna=False)
+                        .size()
+                        .reset_index(name="TOTAL_REGISTROS")
+                        .rename(columns={col_mun: "CODIGO_MUNICIPIO"})
+                        .sort_values("TOTAL_REGISTROS", ascending=False)
+                    )
+                    return agg, arquivos_lidos
+
+            if nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Amostra limitada de microdados":
+                df_res = df_res.head(50000).copy()
+
+            return df_res, arquivos_lidos
 
         if isinstance(res, str): res = [res]
         if isinstance(res, list) and len(res) > 0:
@@ -318,19 +725,23 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
                     continue
 
                 caminho = os.fspath(r) if hasattr(r, "__fspath__") else str(r)
-                if not caminho.endswith(".parquet"): continue
+                if not caminho.endswith(".parquet"):
+                    print(f"[SIH DEBUG] Item ignorado porque nao e parquet: {caminho}")
+                    continue
 
                 nome_arquivo = os.path.basename(caminho).upper()
-                print(f"[SIH DEBUG] Arquivo enviado ao DuckDB: {nome_arquivo}")
+                print(f"[SIH DEBUG] Arquivo lido para DuckDB: {nome_arquivo}")
                 
                 if prefixo_esperado and sistema == "Internações (SIH)":
                     prefixo = str(prefixo_esperado).upper()
                     grupo_solicitado = prefixo[:2]
-                    if grupo_solicitado == "RD":
-                        if any(nome_arquivo.startswith(g) for g in ["SP", "ER", "CM", "RJ", "CH"]): continue
-                        if uf.upper() not in nome_arquivo: continue
-                    else:
-                        if not (grupo_solicitado in nome_arquivo and uf.upper() in nome_arquivo): continue
+                    outros_grupos = [g for g in ["RD", "SP", "ER", "CM", "RJ", "CH"] if g != grupo_solicitado]
+
+                    # Só rejeita quando o próprio nome deixa claro que é outro grupo.
+                    # Não exigir UF no nome, pois caches diferentes do PySUS podem salvar o Parquet
+                    # com nomes internos sem o prefixo DATASUS clássico.
+                    if any(nome_arquivo.startswith(g) for g in outros_grupos):
+                        continue
 
                 arquivos_lidos += 1
                 caminho_sql = caminho.replace("'", "''")
@@ -339,6 +750,7 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
                     cols_parquet = duckdb.query(f"DESCRIBE SELECT * FROM read_parquet('{caminho_sql}')").df()["column_name"].tolist()
                     cols_alvo_upper = [x.upper() for x in cols_alvo]
                     col_filtro = next((c for c in cols_parquet if c.upper() in cols_alvo_upper), None)
+                    print(f"[SIH DEBUG] Coluna usada no filtro municipal: {col_filtro}")
 
                     if id_alvo and col_filtro and nivel_terr == "Município":
                         id_sql = str(id_alvo).replace("'", "''")
@@ -346,7 +758,7 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
                         df = duckdb.query(query).df()
                         frames.append(df)
                     elif id_alvo and not col_filtro and nivel_terr == "Município" and prefixo_esperado and "ER" in prefixo_esperado:
-                        print(f"[SIH DEBUG] Base técnica ER extraída na íntegra.")
+                        print(f"[SIH DEBUG] Base técnica ER lida integramente (ausência de territorialidade).")
                         query = f"SELECT * FROM read_parquet('{caminho_sql}')"
                         df = duckdb.query(query).df()
                         frames.append(df)
@@ -409,7 +821,6 @@ def gerar_metricas_cnes(df, grupo):
         metricas["principal_value"] = len(df)
     return metricas
 
-# 🌟 CORREÇÃO FINAL: RESTAURAÇÃO EXATA DA CASCATA API_SIH COM LOGS APROFUNDADOS
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo="", tipo_resultado=""):
     if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     partes_final = [] 
@@ -434,26 +845,25 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                 print("[SIH DEBUG] Iniciando Download. Grupo:", sih_grupo, "- UF:", uf, "- Ano:", ano, "- Mês:", m)
                 
                 res = None
+                metodo_download = "nenhum"
                 try:
-                    res = api_sih(state=uf, year=int(ano), month=int(m) if m else 0, group=sih_grupo)
-                except Exception as e1:
-                    print(f"[SIH DEBUG] Fallback nivel 1 acionado: {e1}")
-                    try:
-                        res = api_sih(state=uf, year=int(ano), month=int(m) if m else 0, groups=[sih_grupo])
-                    except Exception as e2:
-                        print(f"[SIH DEBUG] Fallback nivel 2 acionado: {e2}")
-                        try:
-                            res = api_sih(state=uf, year=int(ano), month=int(m) if m else 0)
-                        except Exception as e3:
-                            falhas.append(f"SIH FALHA DE DOWNLOAD | {uf} {ano}/{m}: {e3}")
-                            continue
+                    res, metodo_download = baixar_sih_robusto(uf, ano, m, sih_grupo)
+                except Exception as e_download:
+                    print(f"[SIH DOWNLOAD FALHOU] {uf} {ano}/{m} {sih_grupo}: {e_download}")
+                    falhas.append(f"{sistema} FALHA DE DOWNLOAD | {uf} {ano}/{m} {sih_grupo}: {e_download}")
+                    continue
 
+                print("[SIH DEBUG] Metodo de download usado:", metodo_download)
                 print("[SIH DEBUG] Tipo do retorno obtido:", type(res))
                 
                 arquivos_norm = normalizar_lista_arquivos_pysus(res)
                 print("[SIH DEBUG] Tipo após normalização list/DF:", type(arquivos_norm))
+                if isinstance(arquivos_norm, list):
+                    print("[SIH DEBUG] Quantidade de itens normalizados:", len(arquivos_norm))
+                    print("[SIH DEBUG] Amostra dos itens normalizados:", arquivos_norm[:3])
 
                 if isinstance(arquivos_norm, pd.DataFrame):
+                    print(f"[SIH DEBUG] DataFrame resolvido via .to_dataframe(). Dimensões: {arquivos_norm.shape}")
                     df_temp = aplicar_filtros_imediato(arquivos_norm, sistema, nivel_terr, uf, id_filtro, m, cols_alvo, dt_alvos, grupo=sih_grupo)
                 else:
                     arquivos_norm = filtrar_arquivos_sih_exatos(arquivos_norm, uf, ano, m, sih_grupo)
@@ -461,6 +871,8 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                         arquivos_norm, cols_alvo, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado, prefixo_esperado=prefixo_token
                     )
                 
+                print(f"[SIH DEBUG] Linhas finalizadas após filtro territorial: {len(df_temp)}")
+
                 if not df_temp.empty:
                     partes_final.append(df_temp)
                     sucessos_download += 1
@@ -525,60 +937,59 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
         gc.collect()
             
     if not partes_final:
+        detalhe = " | ".join(falhas[-3:]) if falhas else "Sem detalhes operacionais."
+        if "SIH" in sistema:
+            if any("FALHA DE DOWNLOAD" in f for f in falhas):
+                return pd.DataFrame({"Erro": [f"Falha no download do SIH para os filtros selecionados. Detalhe: {detalhe}"]})
+            return pd.DataFrame({"Erro": [f"O SIH foi consultado, mas nenhum registro passou pelos filtros aplicados. Detalhe: {detalhe}"]})
         if any("SEM REGISTROS" in f for f in falhas):
             return pd.DataFrame({"Erro": ["A base foi baixada corretamente, mas não há registros para o território, período ou agravo selecionados."] })
         else:
             return pd.DataFrame({"Erro": ["Falha de conexão ou arquivo inexistente no DATASUS para os filtros selecionados."] })
     return pd.concat(partes_final, ignore_index=True)
 
-# 🌟 CORREÇÃO 14: BLINDAGEM DE MEMÓRIA DA CONVERSÃO DE DICIONÁRIOS
 def tratar_e_traduzir_df(df, sistema):
     df_tratado = df.copy()
     df_tratado.columns = [str(c).upper().strip() for c in df_tratado.columns]
     sigla_sistema = "SIM" if "SIM" in sistema else "SINASC" if "SINASC" in sistema else "SIH" if "SIH" in sistema else "CNES" if "CNES" in sistema else "SINAN"
     
-    dic_dinamico = dict(CONFIG_APP.get("DICIONARIOS_VALORES", {}))
-    dic_sih = dict(dic_dinamico.get("SIH", {}))
-    dic_sih.update({"SEXO": {"1": "Masculino", "3": "Feminino"}, "MORTE": {"0": "Alta", "1": "Óbito"}})
-    dic_dinamico["SIH"] = dic_sih
+    dic_dinamico = CONFIG_APP.get("DICIONARIOS_VALORES", {})
+    if "SIH" not in dic_dinamico: dic_dinamico["SIH"] = {}
+    dic_dinamico["SIH"].update({"SEXO": {"1": "Masculino", "3": "Feminino"}, "MORTE": {"0": "Alta", "1": "Óbito"}})
     
-    dic_sinasc = dict(dic_dinamico.get("SINASC", {}))
-    dic_sinasc.update({
+    if "SINASC" not in dic_dinamico: dic_dinamico["SINASC"] = {}
+    dic_dinamico["SINASC"].update({
         "ESCMAE": {"1": "Nenhuma", "2": "1 a 3 anos", "3": "4 a 7 anos", "4": "8 a 11 anos", "5": "12 anos e mais", "9": "Ignorado"},
         "ESCMAE2010": {"0": "Sem escolaridade", "1": "Fundamental I", "2": "Fundamental II", "3": "Médio", "4": "Superior incompleto", "5": "Superior completo", "9": "Ignorado"},
         "RACACORMAE": {"1": "Branca", "2": "Preta", "3": "Amarela", "4": "Parda", "5": "Indígena", "9": "Ignorado"}
     })
-    dic_dinamico["SINASC"] = dic_sinasc
 
-    if "IDADE" in df_tratado.columns: df_tratado["IDADE"] = df_tratado["IDADE"].apply(decodificar_idade_datasus)
+    if "IDADE" in df_tratado.columns: df_tratado.loc[:, "IDADE"] = df_tratado["IDADE"].apply(decodificar_idade_datasus)
     if "IDADEMAE" in df_tratado.columns: 
-        df_tratado["IDADEMAE"] = df_tratado["IDADEMAE"].apply(decodificar_idade_datasus)
-        df_tratado["GRUPO_IDADE_MAE"] = df_tratado["IDADEMAE"].apply(agrupar_idade_mae)
-    if "NU_IDADE_N" in df_tratado.columns: df_tratado["NU_IDADE_N"] = df_tratado["NU_IDADE_N"].apply(decodificar_idade_datasus)
+        df_tratado.loc[:, "IDADEMAE"] = df_tratado["IDADEMAE"].apply(decodificar_idade_datasus)
+        df_tratado.loc[:, "GRUPO_IDADE_MAE"] = df_tratado["IDADEMAE"].apply(agrupar_idade_mae)
+    if "NU_IDADE_N" in df_tratado.columns: df_tratado.loc[:, "NU_IDADE_N"] = df_tratado["NU_IDADE_N"].apply(decodificar_idade_datasus)
 
     for c_vbo in ["OCUP", "OCUPMAE", "CODOCUPMAE", "ID_OCUPA_N"]:
-        if c_vbo in df_tratado.columns: df_tratado[c_vbo] = df_tratado[c_vbo].apply(decodificar_cbo)
+        if c_vbo in df_tratado.columns: df_tratado.loc[:, c_vbo] = df_tratado[c_vbo].apply(decodificar_cbo)
 
     dict_cid = TABELAS_EXTERNAS.get("CID10", {})
     for col in ["CAUSABAS", "DIAG_PRINC", "DIAG_SECUN", "ID_AGRAVO"]:
-        if col in df_tratado.columns: df_tratado[col] = df_tratado[col].apply(lambda x: decodificar_cid(x, dict_cid))
+        if col in df_tratado.columns: df_tratado.loc[:, col] = df_tratado[col].apply(lambda x: decodificar_cid(x, dict_cid))
 
     dict_sigtap = TABELAS_EXTERNAS.get("SIGTAP", {})
     for col in ["PROC_REA", "PROC_SOLIC"]:
-        if col in df_tratado.columns: df_tratado[col] = df_tratado[col].apply(lambda x: decodificar_sigtap(x, dict_sigtap))
+        if col in df_tratado.columns: df_tratado.loc[:, col] = df_tratado[col].apply(lambda x: decodificar_sigtap(x, dict_sigtap))
 
     for coluna, de_para in dic_dinamico.get(sigla_sistema, {}).items():
         if coluna in df_tratado.columns:
-            df_tratado[coluna] = df_tratado[coluna].apply(normalizar_codigo).map(de_para).fillna("Ignorado/Outros")
+            df_tratado.loc[:, coluna] = df_tratado[coluna].apply(normalizar_codigo).map(de_para).fillna("Ignorado/Outros")
             
-    cabecalhos = dict(CONFIG_APP.get("TRADUCAO_CABECALHOS", {}))
-    cab_sih = dict(cabecalhos.get("SIH", {}))
-    cab_sih.update({"SEXO": "Sexo Paciente", "MORTE": "Desfecho (Alta/Óbito)", "VAL_TOT": "Valor Total AIH (R$)", "VAL_UTI": "Valor UTI (R$)", "DIAG_PRINC": "Diagnóstico Principal (CID-10)", "PROC_REA": "Procedimento Realizado (SIGTAP)"})
-    cabecalhos["SIH"] = cab_sih
-    
-    cab_sinasc = dict(cabecalhos.get("SINASC", {}))
-    cab_sinasc.update({"GRUPO_IDADE_MAE": "Faixa Etária da Mãe", "ESCMAE": "Escolaridade Mãe (Anos)", "ESCMAE2010": "Escolaridade Mãe (2010)", "CODOCUPMAE": "Ocupação/Profissão Mãe (CBO)", "RACACORMAE": "Raça/Cor da Mãe"})
-    cabecalhos["SINASC"] = cab_sinasc
+    cabecalhos = CONFIG_APP.get("TRADUCAO_CABECALHOS", {})
+    if "SIH" not in cabecalhos: cabecalhos["SIH"] = {}
+    cabecalhos["SIH"].update({"SEXO": "Sexo Paciente", "MORTE": "Desfecho (Alta/Óbito)", "VAL_TOT": "Valor Total AIH (R$)", "VAL_UTI": "Valor UTI (R$)", "DIAG_PRINC": "Diagnóstico Principal (CID-10)", "PROC_REA": "Procedimento Realizado (SIGTAP)"})
+    if "SINASC" not in cabecalhos: cabecalhos["SINASC"] = {}
+    cabecalhos["SINASC"].update({"GRUPO_IDADE_MAE": "Faixa Etária da Mãe", "ESCMAE": "Escolaridade Mãe (Anos)", "ESCMAE2010": "Escolaridade Mãe (2010)", "CODOCUPMAE": "Ocupação/Profissão Mãe (CBO)", "RACACORMAE": "Raça/Cor da Mãe"})
     
     df_tratado = df_tratado.rename(columns=cabecalhos.get(sigla_sistema, {}))
     return df_tratado
@@ -673,7 +1084,13 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                     if not df_bruto.empty and "Erro" not in df_bruto.columns:
                         if nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Resumo agregado":
                             df_tratado = df_bruto.copy()
-                            df_tratado.columns = ["CÓDIGO_MUNICÍPIO_RESIDENTE", "TOTAL_DE_REGISTROS"]
+                            if len(df_tratado.columns) == 2:
+                                df_tratado.columns = ["CÓDIGO_MUNICÍPIO_RESIDENTE", "TOTAL_DE_REGISTROS"]
+                            else:
+                                st.warning(
+                                    "A consulta retornou microdados em vez de resumo agregado. "
+                                    "A visualização foi preservada sem renomear colunas para evitar erro de dimensões."
+                                )
                             sistema_titulo = f"Resumo Agregado — {sistema}"
                         else:
                             df_tratado = tratar_e_traduzir_df(df_bruto, sistema)
@@ -782,9 +1199,13 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     if col_raca: st.bar_chart(df_tratado[col_raca].value_counts())
                     else:
                         msg = df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados disponíveis."
-                        if "território, período ou agravo" in msg:
+                        if "SINAN" in sistema and "território, período ou agravo" in msg:
                             st.info("ℹ️ A consulta foi executada com sucesso, mas não foram encontrados registros de notificações para o agravo, território e período selecionados.")
-                        else: st.error(msg)
+                        elif "SIH" in sistema:
+                            st.error(msg)
+                            st.caption("Dica técnica: veja os logs [SIH DEBUG] no terminal/Streamlit Cloud para identificar se o problema ocorreu no download, na normalização do retorno ou no filtro territorial.")
+                        else:
+                            st.error(msg)
 
 # --- ABA DE DICIONÁRIOS E CITAÇÕES ---
 elif aba_ativa == "📚 Dicionários e Citações":
