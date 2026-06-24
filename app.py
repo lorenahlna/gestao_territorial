@@ -1,4 +1,4 @@
-# VERSAO_V18_SIH_DOWNLOAD_DIRETO_DATASUS
+# VERSAO_V19_SIH_DIRETO_DATASUS_PRIORITARIO
 import streamlit as st
 import pandas as pd
 import requests
@@ -552,23 +552,17 @@ def baixar_sih_robusto(uf, ano, mes, grupo):
     """
     Baixa SIH com validação estrita do arquivo esperado.
 
-    Ordem:
-    1) API pública/interna do PySUS, mas só aceita se o arquivo bater exatamente.
-    2) Fallback direto DATASUS: baixa RDUFAAAMM.dbc/SPUFAAAMM.dbc etc., converte para parquet.
-    3) Fallback legado online_data apenas se o módulo existir.
+    Ordem V19:
+    1) Download direto DATASUS por nome exato do arquivo DBC, por exemplo RDMG2503.dbc.
+       Este passa a ser o caminho principal porque os logs do Streamlit Cloud mostram
+       que o PySUS 2.3.0 está retornando SPMG*.parquet mesmo quando o grupo solicitado
+       é RD ou ER.
+    2) Fallback PySUS somente se o download direto falhar. O retorno do PySUS só é aceito
+       se o nome do Parquet bater exatamente com grupo/UF/ano/mês.
     """
     erros = []
 
-    # 1) API PySUS documentada/interna. Pode retornar arquivo divergente em algumas versões/cache.
-    try:
-        res = baixar_sih_fallback_api(uf, ano, mes, grupo)
-        if retorno_sih_valido_para_solicitacao(res, uf, ano, mes, grupo, "api_sih"):
-            return res, "api_sih validado"
-        erros.append("api_sih: retorno vazio ou arquivo divergente")
-    except Exception as e:
-        erros.append(f"api_sih: {repr(e)}")
-
-    # 2) Fallback principal para este bug: arquivo DATASUS exato por nome.
+    # 1) Caminho principal: arquivo DATASUS exato por nome.
     try:
         res = baixar_sih_direto_datasus(uf, ano, mes, grupo)
         if retorno_sih_valido_para_solicitacao(res, uf, ano, mes, grupo, "download direto DATASUS"):
@@ -577,14 +571,14 @@ def baixar_sih_robusto(uf, ano, mes, grupo):
     except Exception as e:
         erros.append(f"download direto DATASUS: {repr(e)}")
 
-    # 3) Fallback opcional para instalações antigas que ainda possuem pysus.online_data.
+    # 2) Fallback PySUS documentado/interno, aceitando apenas arquivo exato.
     try:
-        res = baixar_sih_validado(uf, ano, mes, grupo)
-        if retorno_sih_valido_para_solicitacao(res, uf, ano, mes, grupo, "online_data.SIH posicional"):
-            return res, "online_data.SIH posicional validado"
-        erros.append("online_data.SIH posicional: retorno vazio ou arquivo divergente")
+        res = baixar_sih_fallback_api(uf, ano, mes, grupo)
+        if retorno_sih_valido_para_solicitacao(res, uf, ano, mes, grupo, "api_sih"):
+            return res, "api_sih validado"
+        erros.append("api_sih: retorno vazio ou arquivo divergente")
     except Exception as e:
-        erros.append(f"online_data.SIH posicional: {repr(e)}")
+        erros.append(f"api_sih: {repr(e)}")
 
     raise RuntimeError("Nenhum metodo de download SIH retornou dados uteis. " + " | ".join(erros))
 
