@@ -43,8 +43,8 @@ trava_global = obter_trava_global()
 def listar_anos_disponiveis(sistema="GERAL"):
     ano_atual = datetime.now().year
     limites = {
-        "Mortalidade (SIM)": (1979, 2024),
-        "Nascimentos (SINASC)": (1994, 2020),
+        "Mortalidade (SIM)": (1979, 2026),
+        "Nascimentos (SINASC)": (1994, 2019),
         "Notificações (SINAN)": (2007, 2026),
         "Internações (SIH)": (2008, 2026),
         "Cadastro Nacional de Estabelecimentos (CNES)": (2005, ano_atual),
