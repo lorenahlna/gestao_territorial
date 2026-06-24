@@ -120,10 +120,18 @@ def carregar_tabelas_complementares():
 
 TABELAS_EXTERNAS = carregar_tabelas_complementares()
 
+# PySUS 2.3+ documenta a API publica em `pysus.api`.
+# Mantemos fallback para `_impl.databases` apenas para ambientes antigos.
+PY_SUS_API_ORIGEM = "indisponivel"
 try:
-    from pysus.api._impl.databases import sim as api_sim, sih as api_sih, cnes as api_cnes, sinasc as api_sinasc, sinan as api_sinan
-except ImportError:
-    api_sim = api_sih = api_cnes = api_sinasc = api_sinan = None
+    from pysus.api import sim as api_sim, sih as api_sih, cnes as api_cnes, sinasc as api_sinasc, sinan as api_sinan
+    PY_SUS_API_ORIGEM = "pysus.api"
+except Exception:
+    try:
+        from pysus.api._impl.databases import sim as api_sim, sih as api_sih, cnes as api_cnes, sinasc as api_sinasc, sinan as api_sinan
+        PY_SUS_API_ORIGEM = "pysus.api._impl.databases"
+    except Exception:
+        api_sim = api_sih = api_cnes = api_sinasc = api_sinan = None
 
 UFS = ["AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS","MG","PA","PB","PR","PE","PI","RJ","RN","RS","RO","RR","SC","SP","SE","TO"]
 ESTADOS_IBGE = {"AC": "12", "AL": "27", "AP": "16", "AM": "13", "BA": "29", "CE": "23", "DF": "53", "ES": "32", "GO": "52", "MA": "21", "MT": "51", "MS": "50", "MG": "31", "PA": "15", "PB": "25", "PR": "41", "PE": "26", "PI": "22", "RJ": "33", "RN": "24", "RS": "43", "RO": "11", "RR": "14", "SC": "42", "SP": "35", "SE": "28", "TO": "17"}
@@ -250,6 +258,110 @@ def leitura_segura_parquet(caminho, limite=50000):
         return pd.DataFrame()
 
 # 🌟 LÓGICAS VALIDADAS DE DOWNLOAD E CONVERSÃO SIH
+
+SIH_GRUPOS_ARQUIVO = ("RD", "SP", "ER", "CM", "RJ", "CH")
+
+def extrair_caminhos_retorno_sih(res):
+    """
+    Extrai caminhos de arquivo do retorno do PySUS sem converter ParquetSet para DataFrame.
+    Isso permite validar se o arquivo baixado corresponde ao grupo/UF/ano/mes solicitados.
+    """
+    if res is None:
+        return []
+    itens = res if isinstance(res, (list, tuple, set)) else [res]
+    caminhos = []
+    for item in itens:
+        if item is None:
+            continue
+        if isinstance(item, str):
+            caminhos.append(item)
+        elif hasattr(item, "__fspath__"):
+            caminhos.append(os.fspath(item))
+        elif hasattr(item, "path"):
+            caminhos.append(str(item.path))
+        else:
+            texto = str(item)
+            if ".parquet" in texto.lower():
+                caminhos.append(texto)
+    return caminhos
+
+def classificar_nome_arquivo_sih(caminho, uf, ano, mes, grupo):
+    """
+    Retorna True se o nome DATASUS bate exatamente com grupo/UF/ano/mes.
+    Retorna False se o nome parece ser SIH classico, mas de outro grupo/UF/ano/mes.
+    Retorna None quando o nome local nao permite validar com seguranca.
+    """
+    nome = os.path.basename(str(caminho)).upper()
+    nome_sem_ext = os.path.splitext(nome)[0]
+    ano2 = str(int(ano))[-2:]
+    mes2 = f"{int(mes):02d}"
+    prefixo_exato = f"{grupo}{uf}{ano2}{mes2}".upper()
+
+    if nome_sem_ext.startswith(prefixo_exato):
+        return True
+
+    # Padrao classico DATASUS para SIH: GRUPO + UF + AA + MM, por exemplo RDMG2501.
+    if len(nome_sem_ext) >= 8:
+        grupo_nome = nome_sem_ext[:2]
+        uf_nome = nome_sem_ext[2:4]
+        aa_mm = nome_sem_ext[4:8]
+        if grupo_nome in SIH_GRUPOS_ARQUIVO and uf_nome.isalpha() and aa_mm.isdigit():
+            return False
+
+    return None
+
+def dataframe_parece_grupo_sih(df, grupo):
+    """
+    Valida superficialmente o grupo quando o retorno ja veio como DataFrame.
+    Nao tenta ser exaustivo; serve apenas para evitar aceitar SP quando foi solicitado RD.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return False
+    cols = {str(c).upper().strip() for c in df.columns}
+    if grupo == "RD":
+        return bool(cols.intersection({"MUNIC_RES", "MUNIC_MOV", "N_AIH", "DIAG_PRINC", "VAL_TOT"})) and not all(c.startswith("SP_") for c in cols if c)
+    if grupo == "SP":
+        return bool(cols.intersection({"SP_MUNRES", "SP_MUNMOV", "SP_GESTOR", "SP_NAIH", "SP_PROCREA"}))
+    if grupo == "ER":
+        return bool(cols.intersection({"CO_ERRO", "MUNIC_RES", "MUNIC_MOV", "SP_NAIH"}))
+    return True
+
+def retorno_sih_valido_para_solicitacao(res, uf, ano, mes, grupo, nome_tentativa=""):
+    """
+    Garante que um retorno nao vazio corresponde ao grupo/UF/ano/mes solicitados.
+    Corrige o bug em que a chamada `groups=[RD]` retornava, por exemplo, SPMG2601.parquet
+    para uma consulta RD/MG/2025/01, e o app aceitava esse retorno como sucesso.
+    """
+    if not retorno_pysus_tem_conteudo(res):
+        return False
+
+    caminhos = extrair_caminhos_retorno_sih(res)
+    if caminhos:
+        classificados = [classificar_nome_arquivo_sih(c, uf, ano, mes, grupo) for c in caminhos]
+        if any(v is True for v in classificados):
+            return True
+        if any(v is False for v in classificados):
+            print(
+                f"[SIH DEBUG] Retorno rejeitado por arquivo divergente em {nome_tentativa}. "
+                f"Esperado {grupo}{uf}{str(int(ano))[-2:]}{int(mes):02d}. Recebido: {caminhos[:3]}"
+            )
+            return False
+        # Sem nome classico validavel: aceita e deixa o processamento posterior decidir.
+        return True
+
+    if isinstance(res, pd.DataFrame):
+        ok = dataframe_parece_grupo_sih(res, grupo)
+        if not ok:
+            print(f"[SIH DEBUG] DataFrame rejeitado: colunas nao parecem do grupo {grupo}. Colunas: {list(res.columns)[:20]}")
+        return ok
+
+    if isinstance(res, (list, tuple, set)):
+        frames = [x for x in res if isinstance(x, pd.DataFrame)]
+        if frames:
+            return any(dataframe_parece_grupo_sih(df, grupo) for df in frames)
+
+    return True
+
 def baixar_sih_validado(uf, ano, mes, grupo):
     """
     Baixa dados do SIH usando a chamada posicional validada nos notebooks.
@@ -265,31 +377,49 @@ def baixar_sih_validado(uf, ano, mes, grupo):
 
 def baixar_sih_fallback_api(uf, ano, mes, grupo):
     """
-    Fallback baseado na versão antiga funcional do script usando o client interno.
-    Mantem a mesma ordem da versão que ja funcionava: groups, group, sem grupo.
+    Caminho principal para SIH conforme documentacao PySUS 2.3+:
+        from pysus.api import sih
+        sih(state="SP", year=2024, month=1, group="RD")
+
+    Observacao: `group` e singular na API documentada. `groups` fica apenas como
+    compatibilidade para instalacoes antigas. Evitamos chamada sem grupo para nao
+    baixar grupo diferente do solicitado.
     """
     tentativas = []
 
     if api_sih is None:
         return None
 
-    for nome, kwargs in [
-        ("api_sih groups", {"state": uf, "year": int(ano), "month": int(mes), "groups": [grupo]}),
-        ("api_sih group", {"state": uf, "year": int(ano), "month": int(mes), "group": grupo}),
-        ("api_sih sem grupo", {"state": uf, "year": int(ano), "month": int(mes)}),
-    ]:
+    mes_int = int(mes)
+    ano_int = int(ano)
+
+    chamadas = [
+        ("api_sih documentada group/mes_int", {"state": uf, "year": ano_int, "month": mes_int, "group": grupo}),
+        ("api_sih documentada group/mes_lista", {"state": uf, "year": ano_int, "month": [mes_int], "group": grupo}),
+        ("api_sih compat groups/mes_int", {"state": uf, "year": ano_int, "month": mes_int, "groups": [grupo]}),
+        ("api_sih compat groups/mes_lista", {"state": uf, "year": ano_int, "month": [mes_int], "groups": [grupo]}),
+    ]
+
+    # A chamada sem grupo so e segura para RD, pois RD costuma ser o padrao.
+    # Para SP/ER, chamada sem grupo pode retornar outro grupo e mascarar o erro.
+    if grupo == "RD":
+        chamadas.extend([
+            ("api_sih sem grupo RD/mes_int", {"state": uf, "year": ano_int, "month": mes_int}),
+            ("api_sih sem grupo RD/mes_lista", {"state": uf, "year": ano_int, "month": [mes_int]}),
+        ])
+
+    for nome, kwargs in chamadas:
         try:
             res = api_sih(**kwargs)
-            if retorno_pysus_tem_conteudo(res):
-                print(f"[SIH DEBUG] Download OK via {nome}")
+            if retorno_sih_valido_para_solicitacao(res, uf, ano, mes, grupo, nome):
+                print(f"[SIH DEBUG] Download OK via {nome} | origem={PY_SUS_API_ORIGEM}")
                 return res
-            tentativas.append(f"{nome}: retorno vazio")
+            tentativas.append(f"{nome}: retorno vazio ou arquivo divergente")
         except Exception as e:
             tentativas.append(f"{nome}: {repr(e)}")
 
-    print("[SIH DEBUG] Fallback api_sih sem retorno util:", " | ".join(tentativas))
+    print("[SIH DEBUG] api_sih sem retorno util:", " | ".join(tentativas))
     return None
-
 
 def retorno_pysus_tem_conteudo(res):
     """
@@ -326,18 +456,18 @@ def baixar_sih_robusto(uf, ano, mes, grupo):
     # 1) Priorizar a API da versao antiga, pois foi a que funcionava no app.
     try:
         res = baixar_sih_fallback_api(uf, ano, mes, grupo)
-        if retorno_pysus_tem_conteudo(res):
-            return res, "api_sih antigo"
-        erros.append("api_sih antigo: retorno vazio")
+        if retorno_sih_valido_para_solicitacao(res, uf, ano, mes, grupo, "api_sih"):
+            return res, "api_sih validado"
+        erros.append("api_sih: retorno vazio ou arquivo divergente")
     except Exception as e:
         erros.append(f"api_sih antigo: {repr(e)}")
 
     # 2) Fallback: chamada posicional dos notebooks PySUS.
     try:
         res = baixar_sih_validado(uf, ano, mes, grupo)
-        if retorno_pysus_tem_conteudo(res):
-            return res, "online_data.SIH posicional"
-        erros.append("online_data.SIH posicional: retorno vazio")
+        if retorno_sih_valido_para_solicitacao(res, uf, ano, mes, grupo, "online_data.SIH posicional"):
+            return res, "online_data.SIH posicional validado"
+        erros.append("online_data.SIH posicional: retorno vazio ou arquivo divergente")
     except Exception as e:
         erros.append(f"online_data.SIH posicional: {repr(e)}")
 
@@ -412,30 +542,23 @@ def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     if isinstance(arquivos, pd.DataFrame):
         return arquivos
 
-    ano2 = str(ano)[-2:]
-    mes2 = f"{int(mes):02d}" if mes is not None else ""
-    prefixo_exato = f"{grupo}{uf}{ano2}{mes2}".upper()
-
     selecionados = []
-    outros_grupos = [g for g in ["RD", "SP", "ER", "CM", "RJ", "CH"] if g != grupo]
+    indefinidos = []
+    esperados = f"{grupo}{uf}{str(int(ano))[-2:]}{int(mes):02d}".upper() if mes is not None else f"{grupo}{uf}{str(int(ano))[-2:]}".upper()
 
     for caminho in arquivos:
-        nome = os.path.basename(str(caminho)).upper()
-
-        # Se o arquivo possui nome DATASUS clássico, filtra com precisão.
-        if nome.startswith(prefixo_exato):
+        status = classificar_nome_arquivo_sih(caminho, uf, ano, mes, grupo) if mes is not None else None
+        if status is True:
             selecionados.append(caminho)
-            continue
+        elif status is None:
+            # Nome local nao classico; manter como contingencia.
+            indefinidos.append(caminho)
+        else:
+            print(f"[SIH DEBUG] Arquivo SIH descartado por divergencia. Esperado {esperados}; recebido {os.path.basename(str(caminho)).upper()}")
 
-        # Se está claro que é outro grupo SIH, rejeita.
-        if any(nome.startswith(g) for g in outros_grupos):
-            continue
-
-        # Em algumas versões/cache do PySUS o nome local pode não carregar UF/ano/mês.
-        # Nesse caso, não rejeitar: o próprio download já foi solicitado para UF/ano/mês/grupo.
-        selecionados.append(caminho)
-
-    return selecionados
+    if selecionados:
+        return selecionados
+    return indefinidos
 
 # --- MOTOR SEMÂNTICO E CONSULTAS DUCKDB ---
 def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado="Amostra limitada de microdados", prefixo_esperado=None):
