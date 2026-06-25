@@ -1,4 +1,4 @@
-# VERSAO_FINAL_SIH_PYSUS_230_HOMOLOGADA_V18
+# VERSAO_FINAL_SIH_BLINDAGEM_REDE_V18
 import streamlit as st
 import pandas as pd
 import requests
@@ -7,6 +7,7 @@ import urllib3
 import gc
 import os
 import shutil
+import time
 import threading
 import duckdb
 from datetime import datetime
@@ -137,7 +138,7 @@ def buscar_municipios_por_uf(uf_sigla):
     except:
         return {"Belo Horizonte": {"id7": "3106200", "id6": "310620", "nome": "Belo Horizonte", "uf": "MG"}}
 
-# 🌟 LIMPEZA DE CACHE DO PYSUS APROFUNDADA (IMPEDE O BUG DOS ARQUIVOS DIVERGENTES E CRUZADOS)
+# 🌟 LIMPEZA DE CACHE DO PYSUS (IMPEDE O BUG DOS ARQUIVOS CORROMPIDOS E DIVERGENTES)
 def limpar_cache_pysus_sih():
     caminhos_cache = [
         os.path.expanduser("~/pysus/downloads/ducklake/sih"),
@@ -229,7 +230,7 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
         
         if nivel_terr == "Município" and not col_filtro_real:
             if grupo == "ER" or "ER" in sistema:
-                print("[SIH DEBUG] Grupo ER não tem coluna territorial esperada. Base bruta liberada para exibição técnica.")
+                print("[SIH DEBUG] Grupo ER sem coluna territorial identificada. Prosseguindo sem filtro municipal.")
                 return df_t
             print(f"[ALERTA CRÍTICO] Coluna municipal esperada {cols_alvo} NÃO ENCONTRADA no arquivo: {list(df_t.columns)}")
             return pd.DataFrame() 
@@ -265,25 +266,76 @@ def leitura_segura_parquet(caminho, limite=50000):
         print(f"[ERRO LEITURA SEGURA] {repr(e)}")
         return pd.DataFrame()
 
-# 🌟 FALLBACK SEGURO PARA PYSUS 2.3.0 (EVITA CHAMADAS CEGAS E RETORNOS CRUZADOS)
+# 🌟 LÓGICAS VALIDADAS DE DOWNLOAD E CONVERSÃO SIH
+def baixar_sih_motor_raiz(uf, ano, mes, grupo):
+    """
+    Acessa diretamente a classe base de FTP do PySUS. Impede cache cruzado.
+    """
+    try:
+        from pysus.ftp.databases.sih import SIH
+        motor_sih = SIH()
+        motor_sih.load()
+        
+        ano_str = str(ano)[-2:]
+        mes_str = f"{int(mes):02d}" if mes else ""
+        
+        arquivos_esperados = motor_sih.get_files(dis_group=grupo, uf=uf, year=ano_str, month=mes_str)
+        if not arquivos_esperados:
+            print(f"[SIH MOTOR] Arquivo {grupo}{uf}{ano_str}{mes_str} não encontrado no catálogo do Ministério da Saúde.")
+            return None
+            
+        arquivos_baixados = motor_sih.download(arquivos_esperados)
+        return arquivos_baixados
+    except Exception as e:
+        print(f"[SIH MOTOR ERRO] Falha no acesso direto: {e}")
+        return None
+
+# 🌟 RETRY E EXPONENTIAL BACKOFF NA CONEXÃO HTTPX PARA EVITAR ERRO DE REDE ("peer closed connection")
+def baixar_sih_validado(uf, ano, mes, grupo):
+    max_retries = 3
+    for tentativa in range(max_retries):
+        try:
+            from pysus.online_data.SIH import download
+            obj = download(uf, int(ano), int(mes), grupo)
+            if hasattr(obj, "to_dataframe"):
+                return obj.to_dataframe()
+            if hasattr(obj, "to_pandas"):
+                return obj.to_pandas()
+            if isinstance(obj, pd.DataFrame):
+                return obj
+            return obj
+        except Exception as e:
+            if "RemoteProtocolError" in str(e) or "connection" in str(e).lower():
+                print(f"[SIH REDE] Queda de rede da Fiocruz/PySUS detectada (Tentativa {tentativa+1}/{max_retries}). Retentando...")
+                limpar_cache_pysus_sih() # Apaga o arquivo corrompido que caiu no meio
+                time.sleep(2) # Aguarda o servidor deles respirar
+                continue
+            print(f"[SIH ONLINE_DATA EXCEÇÃO] Falha: {e}")
+            break # Não é erro de rede, sai do loop
+    return None
+
 def baixar_sih_fallback_api(uf, ano, mes, grupo):
-    if not api_sih: return None
     res = None
-    
-    # Tenta todas as assinaturas possíveis para cravar o Grupo
-    tentativas = [
-        {"states": [uf], "years": [int(ano)], "months": [int(mes)], "groups": [grupo]},
+    tentativas_assinatura = [
         {"state": uf, "year": int(ano), "month": int(mes), "groups": [grupo]},
         {"state": uf, "year": int(ano), "month": int(mes), "group": grupo},
+        {"state": uf, "year": int(ano), "month": int(mes)}
     ]
-    for kwargs in tentativas:
-        try:
-            res = api_sih(**kwargs)
-            if res is not None:
-                return res
-        except Exception:
-            pass
-    return None
+    for param in tentativas_assinatura:
+        max_retries = 3
+        for tentativa in range(max_retries):
+            try:
+                res = api_sih(**param)
+                if res is not None:
+                    return res
+            except Exception as e:
+                if "RemoteProtocolError" in str(e) or "connection" in str(e).lower():
+                    print(f"[SIH REDE FALLBACK] Queda de rede na API antiga (Tentativa {tentativa+1}/{max_retries}). Retentando...")
+                    limpar_cache_pysus_sih()
+                    time.sleep(2)
+                    continue
+                break # Quebrou na assinatura atual, tenta a próxima
+    return res
 
 def normalizar_lista_arquivos_pysus(res):
     if res is None: return []
@@ -316,29 +368,27 @@ def normalizar_lista_arquivos_pysus(res):
     if hasattr(res, "path"): return [str(res.path)]
     return [str(res)]
 
-# 🌟 FILTRO ABSOLUTO: ANIQUILA ARQUIVOS INVASORES DE OUTROS GRUPOS
 def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     if isinstance(arquivos, pd.DataFrame): return arquivos
     ano2 = str(ano)[-2:]
     mes2 = f"{int(mes):02d}" if mes is not None else ""
-    prefixo_exato = f"{grupo.upper()}{uf.upper()}{ano2}{mes2}"
+    prefixo_exato = f"{grupo}{uf}{ano2}{mes2}".upper()
     
     selecionados = []
-    outros_grupos = {"RD", "SP", "ER", "CM", "RJ", "CH"} - {grupo.upper()}
-    
     for caminho in arquivos:
         nome = os.path.basename(str(caminho)).upper()
-        
-        # Bloqueia explicitamente se for cache invasor de outro grupo (ex: SPMG2601)
-        if any(nome.startswith(g) for g in outros_grupos):
-            continue
-            
-        if nome.startswith(prefixo_exato):
-            selecionados.append(caminho)
-        elif uf.upper() in nome:
-            # Aceita arquivos que perderam o prefixo, mas tem a UF (Padrão de anomalia do RD)
-            selecionados.append(caminho)
+        if grupo == "RD":
+            if any(nome.startswith(g) for g in ["SP", "ER", "CM", "RJ", "CH"]):
+                continue
+            if uf.upper() in nome:
+                selecionados.append(caminho)
+        else:
+            if nome.startswith(prefixo_exato) or (grupo.upper() in nome and uf.upper() in nome):
+                selecionados.append(caminho)
                 
+    if not selecionados and arquivos:
+        print(f"[SIH FILTRO] Prefixo rígido não bateu. Acionando rede de segurança.")
+        return arquivos
     return selecionados
 
 # --- MOTOR SEMÂNTICO E CONSULTAS DUCKDB ---
@@ -364,15 +414,16 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
                 if not caminho.endswith(".parquet"): continue
 
                 nome_arquivo = os.path.basename(caminho).upper()
-                print(f"[SIH DEBUG] Avaliando Arquivo DuckDB: {nome_arquivo}")
+                print(f"[SIH DEBUG] Arquivo enviado ao DuckDB: {nome_arquivo}")
                 
-                # Dupla checagem DuckDB para ejetar lixo espacial
                 if prefixo_esperado and sistema == "Internações (SIH)":
                     prefixo = str(prefixo_esperado).upper()
                     grupo_solicitado = prefixo[:2]
-                    outros_grupos = {"RD", "SP", "ER", "CM", "RJ", "CH"} - {grupo_solicitado}
-                    if any(nome_arquivo.startswith(g) for g in outros_grupos): continue
-                    if uf.upper() not in nome_arquivo: continue
+                    if grupo_solicitado == "RD":
+                        if any(nome_arquivo.startswith(g) for g in ["SP", "ER", "CM", "RJ", "CH"]): continue
+                        if uf.upper() not in nome_arquivo: continue
+                    else:
+                        if not (grupo_solicitado in nome_arquivo and uf.upper() in nome_arquivo): continue
 
                 arquivos_lidos += 1
                 caminho_sql = caminho.replace("'", "''")
@@ -473,16 +524,28 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
 
                 print(f"[SIH DEBUG] Iniciando. Grupo: {sih_grupo} - UF: {uf} - Ano: {ano} - Mês: {m}")
                 
-                # VARREDURA DE CACHE
+                # 🌟 CACHE BUSTING: DELETA SUJEIRA DO AMBIENTE
                 limpar_cache_pysus_sih()
 
                 res = None
                 
-                # TENTATIVA EXCLUSIVA: Pysus 2.3.0 Api Compatível Segura
+                # 🌟 TENTATIVA 1: O Motor Raiz (Não cruza cache)
                 try:
+                    res = baixar_sih_motor_raiz(uf, ano, m, sih_grupo)
+                except Exception as e_raiz:
+                    print(f"[SIH RAIZ FALHOU]: {e_raiz}")
+                
+                # 🌟 TENTATIVA 2: O Novo Método (Com Retry Exponencial)
+                if not res:
+                    res = baixar_sih_validado(uf, ano, m, sih_grupo)
+                    
+                # 🌟 TENTATIVA 3: A API Clássica de Fallback
+                if not res:
                     res = baixar_sih_fallback_api(uf, ano, m, sih_grupo)
-                except Exception as e_api:
-                    print(f"[SIH API_SIH FALHOU] {uf} {ano}/{m} {sih_grupo}: {e_api}")
+
+                if res is None:
+                    falhas.append(f"SIH FALHA DE DOWNLOAD OU ARQUIVO INEXISTENTE | {uf} {ano}/{m}")
+                    continue
 
                 arquivos_norm = normalizar_lista_arquivos_pysus(res)
 
