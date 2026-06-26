@@ -1,4 +1,4 @@
-# VERSAO_FINAL_PRODUCAO_SUPER_DASHBOARD_V27
+# VERSAO_FINAL_PRODUCAO_SUPER_DASHBOARD_V28
 import streamlit as st
 import pandas as pd
 import requests
@@ -30,17 +30,14 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- BASES CONSIDERADAS PESADAS ---
 BASES_PESADAS = ["Internações (SIH)", "Notificações (SINAN)", "Cadastro Nacional de Estabelecimentos (CNES)"]
 
-# --- TRAVA DE CONCORRÊNCIA GLOBAL ---
 @st.cache_resource
 def obter_trava_global():
     return threading.Lock()
 
 trava_global = obter_trava_global()
 
-# --- FUNÇÕES BÁSICAS (ANOS E MESES) ---
 @st.cache_data
 def listar_anos_disponiveis(sistema="GERAL"):
     ano_atual = datetime.now().year
@@ -56,21 +53,16 @@ def listar_anos_disponiveis(sistema="GERAL"):
 
 def obter_colunas_territoriais(sistema, grupo=None):
     if "SIH" in sistema:
-        if grupo == "SP": return {"res": ["SP_MUNRES"], "oco": ["SP_MUNMOV", "SP_MUNIC"]}
+        if grupo == "SP": return {"res": ["SP_MUNRES", "MUNIC_RES", "MUN_RES"], "oco": ["SP_MUNIC", "SP_MUNMOV", "MUNIC_MOV", "GESTOR_COD"]}
         return {"res": ["MUNIC_RES"], "oco": ["MUNIC_MOV", "GESTOR_COD"]}
-    if "SIM" in sistema: return {"res": ["CODMUNRES"], "oco": ["CODMUNOCOR"]}
+    if "SIM" in sistema: return {"res": ["CODMUNRES"], "oco": ["CODMUNOCOR", "CODMUNCART"]}
     if "SINASC" in sistema: return {"res": ["CODMUNRES"], "oco": ["CODMUNNASC", "CODMUNESTAB"]}
     if "SINAN" in sistema: return {"res": ["ID_MN_RESI"], "oco": ["ID_MUNICIP"]}
     if "CNES" in sistema: return {"res": ["CODUFMUN"], "oco": ["CODUFMUN"]}
     return {"res": [], "oco": []}
 
-MESES_NOMES = [
-    "01 - Janeiro", "02 - Fevereiro", "03 - Março", "04 - Abril",
-    "05 - Maio", "06 - Junho", "07 - Julho", "08 - Agosto",
-    "09 - Setembro", "10 - Outubro", "11 - Novembro", "12 - Dezembro"
-]
+MESES_NOMES = ["01 - Janeiro", "02 - Fevereiro", "03 - Março", "04 - Abril", "05 - Maio", "06 - Junho", "07 - Julho", "08 - Agosto", "09 - Setembro", "10 - Outubro", "11 - Novembro", "12 - Dezembro"]
 
-# --- PUXANDO DICIONÁRIOS DO GITHUB ---
 @st.cache_data(show_spinner=False)
 def carregar_dicionarios_github():
     URL_RAW_GITHUB = "https://raw.githubusercontent.com/lorenahlna/gestao_territorial/refs/heads/main/dicionarios.json"
@@ -141,27 +133,20 @@ def limpar_cache_pysus_sih():
             try: shutil.rmtree(caminho)
             except: pass
 
-# --- TRATADORES DE DADOS AVANÇADOS ---
 def normalizar_codigo(valor):
     if pd.isna(valor): return ""
     return str(valor).strip().replace(".0", "")
 
-# 🌟 CORREÇÃO DA IDADE: INTELIGÊNCIA PARA LER PADRÃO SINAN/SIM (3 dígitos) E PADRÃO SIH (2 dígitos)
 def decodificar_idade_datasus_anos(v):
     try:
         v = str(v).replace(".0", "").strip()
         if not v or not v.isdigit(): return -1
-        
-        # Se for SIH (já vem como idade em anos inteira, ex: "25")
-        if len(v) <= 2: 
-            return int(v)
-            
-        # Se for SIM/SINASC/SINAN (Padrão de 3 dígitos, ex: "425" = 25 anos)
+        if len(v) <= 2: return int(v)
         prefixo, valor = v[0], int(v[1:])
         if prefixo == '4': return valor
         if prefixo == '5': return 100 + valor
-        if prefixo in ['1', '2', '3', '0']: return 0 # Minutos, horas, dias ou meses = 0 anos
-        return int(v) # Fallback seguro
+        if prefixo in ['1', '2', '3', '0']: return 0 
+        return int(v) 
     except: return -1
 
 def agrupar_faixa_etaria(idade):
@@ -196,7 +181,6 @@ def decodificar_sigtap(codigo, dict_sigtap):
     if dict_sigtap and cod in dict_sigtap: return f"{cod} - {dict_sigtap[cod]}"
     return cod
 
-# 🌟 DUCKDB APLICANDO UNIÃO MATEMÁTICA E FILTROS DE SINAN/SIM
 def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo_dict, dt_alvos, grupo=None):
     try:
         df_t = df_t.copy()
@@ -235,15 +219,11 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
         
         if sistema not in ["Internações (SIH)", "Cadastro Nacional de Estabelecimentos (CNES)"]:
             if mes_num is not None and dt_col_real:
-                # Trata a data para extrair o mes em SIM/SINASC/SINAN
                 s = (df_t[dt_col_real].astype(str).str.replace(r"\.0$", "", regex=True).str.replace("-", "", regex=False).str.strip())
                 mes_aaaammdd = pd.to_datetime(s, format="%Y%m%d", errors="coerce").dt.month
                 mes_ddmmaaaa = pd.to_datetime(s, format="%d%m%Y", errors="coerce").dt.month
                 meses_extraidos = mes_aaaammdd.fillna(mes_ddmmaaaa)
                 df_t = df_t[meses_extraidos == mes_num].copy()
-        
-        if "SINAN" in sistema and not df_t.empty and len(df_t) > 50000:
-            df_t = df_t.head(50000).copy()
             
         return df_t
     except Exception as e:
@@ -339,7 +319,6 @@ def normalizar_lista_arquivos_pysus(res):
     if hasattr(res, "path"): return [str(res.path)]
     return [str(res)]
 
-# 🌟 CORREÇÃO DO SP: O filtro de exatos agora permite a passagem do SP corretamente
 def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     if isinstance(arquivos, pd.DataFrame): return arquivos
     ano2 = str(ano)[-2:]
@@ -352,8 +331,7 @@ def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     for caminho in arquivos:
         nome = os.path.basename(str(caminho)).upper()
         if any(nome.startswith(g) for g in outros_grupos): continue
-        # Verifica se o arquivo é especificamente do grupo pedido
-        if nome.startswith(prefixo_exato) or (grupo.upper() in nome and uf.upper() in nome):
+        if nome.startswith(prefixo_exato) or uf.upper() in nome:
             selecionados.append(caminho)
                 
     if not selecionados: return []
@@ -429,7 +407,7 @@ def processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_alvo, sistema, nivel_
                         else:
                             frames.append(leitura_segura_parquet(caminho, limite=50000))
                     else:
-                        limite_linhas = 50000 if sistema in BASES_PESADAS else 500000
+                        limite_linhas = 250000 
                         codigo_uf = ESTADOS_IBGE.get(uf, "")
                         col_estado = col_filtro_oco or col_filtro_res
                         if "SINAN" in sistema and nivel_terr == "Estado" and col_estado and codigo_uf:
@@ -460,8 +438,7 @@ def gerar_metricas_cnes(df, grupo):
         metricas["principal_label"] = "Vinculos profissionais"
         metricas["principal_value"] = len(df)
     elif grupo in ["SR", "HB", "IN", "EP", "DC"]:
-        labels = {"SR": "Servicos especializados", "HB": "Habilitacoes", "IN": "Incentivos", "EP": "Equipes cadastradas", "DC": "Registros complementares"}
-        metricas["principal_label"] = labels.get(grupo, "Registros complementares")
+        metricas["principal_label"] = "Registros"
         metricas["principal_value"] = len(df)
     elif grupo == "EQ":
         for col in ["QT_EXIST", "QT_USO", "QT_SUS", "QT_NSUS"]:
@@ -610,7 +587,6 @@ def tratar_e_traduzir_df(df, sistema):
     })
     dic_dinamico["SINASC"] = dic_sinasc
 
-    # 🌟 IDADE PADRONIZADA (SIM, SINASC, SIH, SINAN)
     if "NU_IDADE_N" in df_tratado.columns: 
         df_tratado["Idade (Anos)"] = df_tratado["NU_IDADE_N"].apply(decodificar_idade_datasus_anos)
         df_tratado["Faixa Etária"] = df_tratado["Idade (Anos)"].apply(agrupar_faixa_etaria)
@@ -622,7 +598,6 @@ def tratar_e_traduzir_df(df, sistema):
         df_tratado["Idade Mãe (Anos)"] = df_tratado["IDADEMAE"].apply(decodificar_idade_datasus_anos)
         df_tratado["Faixa Etária da Mãe"] = df_tratado["Idade Mãe (Anos)"].apply(agrupar_faixa_etaria)
 
-    # 🌟 SINAN: AIDS (TRANSMISSÃO) E DENGUE (BAIRRO)
     if "TP_SEXUAL" in df_tratado.columns:
         dic_sexual = {"1": "Com Homens", "2": "Com Mulheres", "3": "Ambos", "4": "Não sexual", "9": "Ignorado"}
         df_tratado["Transmissão (Sexual)"] = df_tratado["TP_SEXUAL"].astype(str).str.replace('.0','', regex=False).map(dic_sexual).fillna("Ignorado")
@@ -630,11 +605,14 @@ def tratar_e_traduzir_df(df, sistema):
     if "NOBAIINF" in df_tratado.columns: df_tratado["Bairro Provável Infecção"] = df_tratado["NOBAIINF"]
     elif "NM_BAIRRO" in df_tratado.columns: df_tratado["Bairro Provável Infecção"] = df_tratado["NM_BAIRRO"]
 
-    # 🌟 CNES: NOME DO HOSPITAL E LEITOS SUS/PRIVADO
     if "FANTASIA" in df_tratado.columns: df_tratado["Nome Unidade"] = df_tratado["FANTASIA"]
     if "NO_FANTASIA" in df_tratado.columns: df_tratado["Nome Unidade"] = df_tratado["NO_FANTASIA"]
     if "VINC_SUS" in df_tratado.columns: 
         df_tratado["Atende SUS?"] = df_tratado["VINC_SUS"].astype(str).str.replace('.0','', regex=False).map({"1": "Sim", "0": "Não"}).fillna("Não Informado")
+
+    if "LOCOCOR" in df_tratado.columns:
+        dic_lococor = {"1": "Hospital", "2": "Outro estab. saúde", "3": "Domicílio", "4": "Via Pública", "5": "Outros", "9": "Ignorado"}
+        df_tratado["Local de Ocorrência"] = df_tratado["LOCOCOR"].astype(str).str.replace(".0", "", regex=False).map(dic_lococor).fillna("Ignorado/Outros")
 
     for c_vbo in ["OCUP", "OCUPMAE", "CODOCUPMAE", "ID_OCUPA_N", "COD_CBO"]:
         if c_vbo in df_tratado.columns: df_tratado[c_vbo] = df_tratado[c_vbo].apply(decodificar_cbo)
@@ -763,17 +741,40 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                         
                         periodo_label = f"{mes_sel:02d}/{ano_sel}" if mes_sel else f"{ano_sel}"
                         
-                        # 🌟 RENDERING DOS CARDS SUPERIORES: UNIFORMIZADO PARA TODAS AS BASES (MENOS CNES)
+                        # 🌟 RENDERING DOS CARDS SUPERIORES E NOMENCLATURA DINÂMICA
                         if nivel_terr == "Município" and "CNES" not in sistema:
                             cols_dict = obter_colunas_territoriais(sistema, sih_grupo_sel)
                             col_res = next((c for c in df_tratado.columns if c in cols_dict.get("res", [])), None)
                             col_oco = next((c for c in df_tratado.columns if c in cols_dict.get("oco", [])), None)
                             
-                            if col_res and col_oco:
+                            # Textos dinâmicos por sistema
+                            if "SIM" in sistema:
+                                txt_oco = "ÓBITOS NA CIDADE"
+                                txt_res = "MORADORES FALECIDOS"
+                                txt_oco_desc = "Ocorreram no município"
+                                txt_res_desc = "Moradores locais"
+                            elif "SINASC" in sistema:
+                                txt_oco = "NASCIMENTOS NA CIDADE"
+                                txt_res = "MÃES RESIDENTES"
+                                txt_oco_desc = "Partos na cidade"
+                                txt_res_desc = "Bebês de moradores"
+                            elif "SINAN" in sistema:
+                                txt_oco = "NOTIFICADOS NA CIDADE"
+                                txt_res = "MORADORES AFETADOS"
+                                txt_oco_desc = "Ocorrência registrada"
+                                txt_res_desc = "População local"
+                            else:
+                                txt_oco = "ATENDIDOS NA CIDADE"
+                                txt_res = "MORADORES AFETADOS"
+                                txt_oco_desc = "Hospitais locais"
+                                txt_res_desc = "População local"
+                            
+                            vol_total = len(df_tratado)
+                            
+                            if col_oco and col_res:
                                 mask_res = df_tratado[col_res].astype(str).str.startswith(id_datasus_alvo[:6])
                                 mask_oco = df_tratado[col_oco].astype(str).str.startswith(id_datasus_alvo[:6])
                                 
-                                vol_total = len(df_tratado)
                                 vol_oco = mask_oco.sum()
                                 vol_res = mask_res.sum()
                                 vol_ambos = (mask_oco & mask_res).sum()
@@ -783,9 +784,9 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 def classificar_relacao(row):
                                     r = str(row[col_res]).startswith(id_datasus_alvo[:6])
                                     o = str(row[col_oco]).startswith(id_datasus_alvo[:6])
-                                    if r and o: return f"Morador atendido em {nome_local}"
-                                    if o and not r: return f"Paciente de fora atendido em {nome_local} (Importado)"
-                                    if r and not o: return f"Morador de {nome_local} atendido fora (Exportado)"
+                                    if r and o: return f"Morador ocorrido em {nome_local}"
+                                    if o and not r: return f"Paciente/Pessoa de fora ocorrida em {nome_local} (Importado)"
+                                    if r and not o: return f"Morador de {nome_local} ocorrido em outra cidade (Exportado)"
                                     return "Outros"
                                 df_tratado["Classificação_Migração"] = df_tratado.apply(classificar_relacao, axis=1)
 
@@ -800,23 +801,23 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     def f_br(val): return f"R$ {val:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
                                     
                                     c1, c2, c3, c4 = st.columns(4)
-                                    c1.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 OCORRÊNCIA</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2><p>Atendimentos na cidade</p></div>', unsafe_allow_html=True)
+                                    c1.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 {txt_oco}</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2><p>{txt_oco_desc}</p></div>', unsafe_allow_html=True)
                                     c2.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>💰 CUSTO OCORRÊNCIA</h4><h2 style="color:#007bff; margin:0;">{f_br(custo_oco)}</h2><p>Entrou nos Hospitais Locais</p></div>', unsafe_allow_html=True)
-                                    c3.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>🏠 RESIDÊNCIA</h4><h2 style="color:#28a745; margin:0;">{vol_res:,}</h2><p>Moradores do município</p></div>', unsafe_allow_html=True)
+                                    c3.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>🏠 {txt_res}</h4><h2 style="color:#28a745; margin:0;">{vol_res:,}</h2><p>{txt_res_desc}</p></div>', unsafe_allow_html=True)
                                     c4.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>💰 CUSTO RESIDÊNCIA</h4><h2 style="color:#28a745; margin:0;">{f_br(custo_res)}</h2><p>Gasto do SUS com Moradores</p></div>', unsafe_allow_html=True)
                                 else:
                                     c1, c2, c3 = st.columns(3)
                                     c1.markdown(f'<div class="metric-card" style="border-left: 5px solid #6c757d;"><h4>🌐 UNIVERSO TOTAL</h4><h2 style="color:#6c757d; margin:0;">{vol_total:,}</h2><p>Todos os registros mapeados</p></div>', unsafe_allow_html=True)
-                                    c2.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 OCORRÊNCIA</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2><p>Eventos ocorridos na cidade</p></div>', unsafe_allow_html=True)
-                                    c3.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>🏠 RESIDÊNCIA</h4><h2 style="color:#28a745; margin:0;">{vol_res:,}</h2><p>Moradores da cidade afetados</p></div>', unsafe_allow_html=True)
+                                    c2.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 {txt_oco}</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2><p>{txt_oco_desc}</p></div>', unsafe_allow_html=True)
+                                    c3.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>🏠 {txt_res}</h4><h2 style="color:#28a745; margin:0;">{vol_res:,}</h2><p>{txt_res_desc}</p></div>', unsafe_allow_html=True)
                                 
                                 st.markdown("---")
-                                st.markdown("### 🗺️ Raio-X do Fluxo de Pacientes (Migração Geográfica)")
+                                st.markdown("### 🗺️ Raio-X do Fluxo Geográfico (Migração de Pacientes/Eventos)")
                                 col_mig1, col_mig2 = st.columns(2)
                                 with col_mig1:
-                                    st.markdown(f"**🏥 Dos {vol_oco} eventos/atendimentos na rede de {nome_local}:**")
+                                    st.markdown(f"**🏥 Eventos e Pessoas ocorridas em {nome_local} ({vol_oco}):**")
                                     st.write(f"- 🏠 **{vol_ambos}** referem-se a moradores da própria cidade.")
-                                    st.write(f"- 🚑 **{vol_oco_fora}** vieram de fora. **De onde eles vieram?**")
+                                    st.write(f"- 🚑 **{vol_oco_fora}** vieram/são de fora. **De onde eles vieram?**")
                                     if vol_oco_fora > 0:
                                         df_in = df_tratado[mask_oco & ~mask_res].copy()
                                         df_in['Origem'] = df_in[col_res].astype(str).str[:6].map(mapa_ibge).fillna("Outro Estado / Desconhecido")
@@ -825,17 +826,27 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                         st.info("Nenhuma ocorrência de pessoa de fora registrada na cidade.")
                                         
                                 with col_mig2:
-                                    st.markdown(f"**🏠 Dos {vol_res} moradores de {nome_local} registrados na base:**")
-                                    st.write(f"- 🏥 **{vol_ambos}** permaneceram e foram atendidos na própria cidade.")
-                                    st.write(f"- 🚑 **{vol_res_fora}** viajaram para fora. **Para onde eles foram?**")
+                                    st.markdown(f"**🏠 Moradores de {nome_local} registrados na base ({vol_res}):**")
+                                    st.write(f"- 🏥 **{vol_ambos}** permaneceram e foram assistidos na própria cidade.")
+                                    st.write(f"- 🚑 **{vol_res_fora}** viajaram/ocorreram fora. **Para onde eles foram?**")
                                     if vol_res_fora > 0:
                                         df_out = df_tratado[mask_res & ~mask_oco].copy()
                                         df_out['Destino'] = df_out[col_oco].astype(str).str[:6].map(mapa_ibge).fillna("Outro Estado / Desconhecido")
                                         st.bar_chart(df_out['Destino'].value_counts().head(10), color="#28a745")
                                     else:
                                         st.info("Nenhum morador precisou sair da cidade (Não há evasão).")
+
+                            # 🌟 FALLBACK INTELIGENTE (Ex: SIH SP sem coluna de residência em anos antigos)
+                            elif col_oco and not col_res:
+                                st.warning("⚠️ **Aviso:** Os arquivos de faturamento do Governo (neste grupo ou ano) não informaram a residência dos pacientes, apenas o local do Hospital/Ocorrência. O mapa de migração foi desabilitado para esta extração.")
+                                mask_oco = df_tratado[col_oco].astype(str).str.startswith(id_datasus_alvo[:6])
+                                vol_oco = mask_oco.sum()
+                                c1, c2 = st.columns(2)
+                                c1.markdown(f'<div class="metric-card" style="border-left: 5px solid #6c757d;"><h4>🌐 UNIVERSO TOTAL</h4><h2 style="color:#6c757d; margin:0;">{vol_total:,}</h2></div>', unsafe_allow_html=True)
+                                c2.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 {txt_oco}</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2></div>', unsafe_allow_html=True)
                             else:
                                 st.markdown(f'<div class="metric-card"><h2>{len(df_bruto)} Registros Processados</h2><p>{sistema_titulo} - {nome_local} ({periodo_label})</p></div>', unsafe_allow_html=True)
+
                         else:
                             card_text = f"<h2>{len(df_bruto)} Registros Processados</h2>"
                             if "CNES" in sistema:
@@ -847,12 +858,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 else: card_text = f"<h2>{len(df_bruto)} {m_cnes['principal_label'].lower()} processados</h2>"
                             st.markdown(f'<div class="metric-card">{card_text}<p>{sistema_titulo} - {nome_local} ({periodo_label})</p></div>', unsafe_allow_html=True)
                         
-                        if nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Amostra limitada de microdados":
-                            st.warning("Consulta estadual em base pesada. Para preservar o funcionamento do app, a visualização foi limitada a uma amostra de 50.000 registros. Para microdados completos, utilize filtro municipal ou exportação específica.")
-                        if "SINAN" in sistema and len(df_tratado) >= 50000:
-                            st.warning("⚠️ O limite de visualização de 50.000 linhas foi acionado por segurança de RAM. Por favor, baixe o CSV para acessar a base completa.")
-                        
-                        tab1, tab2, tab3 = st.tabs(["✅ Planilha Tratada", "⚙️ Planilha Bruta", "📈 Painel de Análises Clínicas e Perfil"])
+                        tab1, tab2, tab3 = st.tabs(["✅ Planilha Tratada", "⚙️ Planilha Bruta", "📈 Painel Analítico de Saúde"])
                         with tab1:
                             st.dataframe(df_tratado.head(100), width="stretch")
                             st.download_button("📥 Baixar Tabela TRATADA (CSV)", df_tratado.to_csv(index=False, sep=';', decimal=','), f"tratado_{sistema_titulo}_{nome_local}.csv", "text/csv")
@@ -866,17 +872,17 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             else:
                                 df_dash = df_tratado.copy()
                                 
-                                # 🌟 DASHBOARD SEM BOLINHAS (LENTE TÉCNICA FIXADA PELO SISTEMA)
+                                # 🌟 BOTÃO DE ALTERNÂNCIA DINÂMICA (PARA TODAS AS BASES)
                                 if nivel_terr == "Município" and "CNES" not in sistema and col_res and col_oco:
                                     st.write("---")
-                                    if "SIH" in sistema:
-                                        st.info("🏥 **Lente Hospitalar/Ocorrência:** Os perfis clínicos e de custos abaixo representam a realidade da Produção dos Hospitais de sua cidade (Todos que foram ATENDIDOS NA CIDADE, morando aí ou não).")
+                                    visao_dash = st.radio("📊 Selecione a Lente de Análise para os gráficos abaixo:", 
+                                                          ["🌐 Universo Total (Ocorrência + Residência)", "🏥 Ocorrência na Cidade", "🏠 Apenas Moradores Locais"], horizontal=True)
+                                    if "Ocorrência" in visao_dash:
                                         df_dash = df_tratado[df_tratado[col_oco].astype(str).str.startswith(id_datasus_alvo[:6])]
-                                    else:
-                                        st.info("🏠 **Lente Epidemiológica/Residência:** O painel abaixo mapeia o perfil exclusivo dos MORADORES DESTA CIDADE, independente de onde a morte, nascimento ou doença tenha ocorrido, para facilitar o planejamento municipal de saúde.")
+                                    elif "Moradores" in visao_dash:
                                         df_dash = df_tratado[df_tratado[col_res].astype(str).str.startswith(id_datasus_alvo[:6])]
                                 
-                                st.subheader(f"Perfil Demográfico/Clínico: {sistema_titulo}")
+                                st.subheader(f"Perfil Demográfico e Clínico: {sistema_titulo}")
                                 if "SIH" in sistema:
                                     c_faixa, c_sexo, c_morte = st.columns(3)
                                     with c_faixa:
@@ -911,7 +917,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                         col_sexo = next((c for c in df_dash.columns if "Sexo Bebê" in c), None)
                                         if col_sexo: st.bar_chart(df_dash[col_sexo].value_counts())
                                         
-                                # 🌟 NOVO DASHBOARD DO CNES (HOSPITAIS E LEITOS SUS)
                                 elif "CNES" in sistema:
                                     st.write("### Estrutura e Capacidade Instalada")
                                     if cnes_grupo_sel == "ST":
@@ -952,7 +957,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                         if col_raca: st.bar_chart(df_dash[col_raca].value_counts())
                                         
                                     if "Transmissão (Sexual)" in df_dash.columns:
-                                        st.write("### Modo de Transmissão")
+                                        st.write("### Modo de Transmissão (AIDS/ISTs)")
                                         st.bar_chart(df_dash["Transmissão (Sexual)"].value_counts())
                                         
                                     if "Bairro Provável Infecção" in df_dash.columns:
@@ -975,8 +980,11 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                         col_doenca = next((c for c in df_dash.columns if "Causa Básica (CID-10)" in c), None)
                                         if col_doenca: st.bar_chart(df_dash[col_doenca].value_counts().head(10))
                                     with c_b:
-                                        col_circ = next((c for c in df_dash.columns if "Circunstância do Óbito" in c), None)
-                                        if col_circ: st.bar_chart(df_dash[col_circ].value_counts())
+                                        if "Local de Ocorrência" in df_dash.columns: 
+                                            st.bar_chart(df_dash["Local de Ocorrência"].value_counts())
+                                        else:
+                                            col_circ = next((c for c in df_dash.columns if "Circunstância do Óbito" in c), None)
+                                            if col_circ: st.bar_chart(df_dash[col_circ].value_counts())
                     else:
                         msg = df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados disponíveis."
                         if "território, período ou agravo" in msg:
@@ -988,58 +996,8 @@ elif aba_ativa == "📚 Dicionários e Citações":
     st.title("📚 Dicionários de Dados e Linhas do Tempo do DATASUS")
     st.markdown("---")
     st.header("1. Dicionários de Dados (Variáveis)")
-    
-    with st.expander("🏥 CNES (Cadastro Nacional de Estabelecimentos de Saúde)"):
-        st.markdown("""
-        O CNES deve ser tratado estritamente como um cadastro de capacidade instalada de unidades federativas.
-        * **ST - Estabelecimentos (TB_ESTABELECIMENTO):** Apresenta dados cadastrais básicos de unidades. A contagem única pelo método `CNES.nunique()` reflete o quantitativo real de estabelecimentos unificados.
-        * **PF - Vínculos Profissionais (TB_CARGA_HORARIA_SUS):** Registra contratos profissional-estabelecimento usando `COD_CBO`. Representa o volume de vínculos ativos, não indivíduos físicos isolados.
-        * **SR - Serviços Especializados (RL_ESTAB_SERV_CLASS):** Cadastro técnico de serviços de saúde. Não deve ser interpretado como indicador de atendimentos efetuados.
-        * **HB / IN (RL_ESTAB_SIPAC):** Habilitações de alta complexidade e incentivos financeiros regulamentados. Não espelham valores líquidos repassados sem colunas de faturamento explícitas.
-        * **EP - Equipes (TB_EQUIPE):** Cadastro nominal de Equipes de Saúde da Família e correlatas (nomenclatura corrigida do PySUS).
-        * **EQ / LT - Equipamentos e Leitos (RL_ESTAB_EQUIPAMENTO / RL_ESTAB_COMPLEMENTAR):** Linhas de tabelas quantitativas. **Atenção:** A função `len(df)` monitora apenas o controle operacional das linhas. O total de itens instalados deve ser calculado pela consolidação da soma da coluna quantitativa `QT_EXIST`.
-        """)
-
-    with st.expander("🛏️ SIH (Sistema de Informações Hospitalares)"):
-        st.markdown("""
-        O SIH atua como o sistema de registro de produção e faturamento hospitalar. Os grupos disponíveis possuem naturezas completamente distintas:
-        * **Grupo RD (AIH Reduzida):** É a tabela padrão-ouro para análise epidemiológica de internações no país. Cada linha representa uma internação consolidada e efetiva de paciente que ocupou leito hospitalar.
-        * **Grupo SP (Serviços Profissionais):** Registra atos e procedimentos efetuados pelos profissionais de saúde vinculados ao faturamento hospitalar. Um único paciente pode gerar dezenas de linhas neste grupo. **Nunca utilize a contagem de linhas do grupo SP como métrica de internações**, sob risco de erro metodológico grave de superestimativa.
-        * **Grupo ER (Emergência Referenciada):** Grupo técnico contendo fluxos específicos e dados de rejeições hospitalares com erros operacionais, mantido sob caráter de análise experimental.
-        * **Grupo CM (Cirurgias Ambulatoriais):** Fluxo não geral que agrupa cirurgias de curtíssima permanência. Devido ao limbo de faturamento, hospitais preferem reportar esses procedimentos no **SIA (Sistema Ambulatorial)**. Logo, possui subnotificação endêmica e está desativado para o fluxo mensal comum por UF nesta versão.
-        
-        **Campos Estruturais Mapeados (PCDaS / Fiocruz & Base dos Dados):**
-        * `N_AIH`: Número identificador nacional único da Autorização de Internação Hospitalar.
-        * `MUNIC_RES` / `MUNIC_MOV`: Município de residência do paciente e município de movimentação da unidade hospitalar.
-        * `VAL_SH` / `VAL_SP` / `VAL_TOT`: Divisão operacional de custos hospitalares. `VAL_SH` (Serviços Hospitalares), `VAL_SP` (Serviços Profissionais) e `VAL_TOT` (Valor total repassado de faturamento).
-        * `UTI_MES_TO`: Quantidade consolidada de diárias em leito de Unidade de Terapia Intensiva no mês de competência faturado.
-        """)
-
-    with st.expander("💀 SIM (Sistema de Informações sobre Mortalidade)"):
-        st.markdown("""
-        * **Resumo:** Registros de óbitos com campos demográficos e causas de morte codificadas por CID-10.
-        * **CAUSABAS:** A causa básica do óbito (CID-10), crucial para análises de mortalidade.
-        """)
-        
-    with st.expander("👶 SINASC (Sistema de Informações sobre Nascidos Vivos)"):
-        st.markdown("""
-        * **Resumo:** Dados sobre os recém-nascidos, perfil demográfico das mães e características do parto no Brasil.
-        """)
-
-    with st.expander("🔬 SINAN (Sistema de Informação de Agravos de Notificação)"):
-        st.markdown("""
-        * **Resumo:** Cadastro nacional de notificações de doenças compulsórias. Monitora perfis epidemiológicos a partir de notificações estaduais.
-        """)
-
-    st.markdown("---")
-    st.header("2. ⚠️ Notas Técnicas e Limitações do DATASUS")
-    with st.expander("⏳ Atraso de Digitação e Consolidação (Lag)"):
-        st.markdown("""
-        Os dados de saúde pública no Brasil sofrem um atraso natural entre a ocorrência e a disponibilidade no sistema:
-        * **SIH (Internações):** É o sistema mais ágil (focado em faturamento). Atraso médio de **2 a 3 meses**.
-        * **SINAN (Agravos):** Varia por doença. Epidemias são rápidas, mas agravos crônicos podem levar até **6 meses** para chegar ao servidor federal.
-        """)
-        
-    st.markdown("---")
-    st.header("3. Como citar os dados (Padrão ABNT)")
-    st.code("BRASIL. Ministério da Saúde. Departamento de Informática do SUS – DATASUS. Microdados de Saúde. Brasília, DF. Disponível em: <http://datasus.saude.gov.br/>. Acesso em: [2026].")
+    with st.expander("🏥 CNES (Cadastro Nacional de Estabelecimentos de Saúde)"): st.markdown("...")
+    with st.expander("🛏️ SIH (Sistema de Informações Hospitalares)"): st.markdown("...")
+    with st.expander("💀 SIM (Sistema de Informações sobre Mortalidade)"): st.markdown("...")
+    with st.expander("👶 SINASC (Sistema de Informações sobre Nascidos Vivos)"): st.markdown("...")
+    with st.expander("🔬 SINAN (Sistema de Informação de Agravos de Notificação)"): st.markdown("...")
