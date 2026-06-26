@@ -1,4 +1,4 @@
-# VERSAO_FINAL_PRODUCAO_SUPER_DASHBOARD_V29
+# VERSAO_FINAL_PRODUCAO_SUPER_DASHBOARD_V30
 import streamlit as st
 import pandas as pd
 import requests
@@ -51,14 +51,14 @@ def listar_anos_disponiveis(sistema="GERAL"):
     ano_inicial, ano_final = limites.get(sistema, (1995, ano_atual - 1))
     return list(range(ano_final, ano_inicial - 1, -1))
 
-# 🌟 RADAR EXPANDIDO PARA O SIH-SP
+# 🌟 DICIONÁRIO DE COLUNAS TERRITORIAIS
 def obter_colunas_territoriais(sistema, grupo=None):
     if "SIH" in sistema:
-        if grupo == "SP": return {"res": ["SP_MUNRES", "MUNIC_RES", "MUN_RES"], "oco": ["SP_MUNIC", "SP_MUNMOV", "MUNIC_MOV", "GESTOR_COD", "CGC_HOSP"]}
+        if grupo == "SP": return {"res": ["SP_MUNRES", "MUNIC_RES"], "oco": ["SP_MUNIC", "SP_MUNMOV", "MUNIC_MOV", "GESTOR_COD"]}
         return {"res": ["MUNIC_RES"], "oco": ["MUNIC_MOV", "GESTOR_COD"]}
     if "SIM" in sistema: return {"res": ["CODMUNRES"], "oco": ["CODMUNOCOR", "CODMUNCART"]}
-    if "SINASC" in sistema: return {"res": ["CODMUNRES"], "oco": ["CODMUNNASC", "CODMUNESTAB"]}
-    if "SINAN" in sistema: return {"res": ["ID_MN_RESI"], "oco": ["ID_MUNICIP"]}
+    if "SINASC" in sistema: return {"res": ["CODMUNRES"], "oco": ["CODMUNNASC", "CODMUNESTAB", "COMUNESTAB"]}
+    if "SINAN" in sistema: return {"res": ["ID_MN_RESI"], "oco": ["ID_MUNICIP", "ID_UNIDADE"]}
     if "CNES" in sistema: return {"res": ["CODUFMUN"], "oco": ["CODUFMUN"]}
     return {"res": [], "oco": []}
 
@@ -225,10 +225,6 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
                 mes_ddmmaaaa = pd.to_datetime(s, format="%d%m%Y", errors="coerce").dt.month
                 meses_extraidos = mes_aaaammdd.fillna(mes_ddmmaaaa)
                 df_t = df_t[meses_extraidos == mes_num].copy()
-        
-        # 🌟 REMOVIDA A TRAVA DE 50 MIL LINHAS PARA MUNICÍPIOS!
-        if "SINAN" in sistema and not df_t.empty and nivel_terr == "Estado" and len(df_t) > 50000:
-            df_t = df_t.head(50000).copy()
             
         return df_t
     except Exception as e:
@@ -324,6 +320,7 @@ def normalizar_lista_arquivos_pysus(res):
     if hasattr(res, "path"): return [str(res.path)]
     return [str(res)]
 
+# 🌟 CORREÇÃO DO SP: REDE DE SEGURANÇA RESTAURADA (V20)
 def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     if isinstance(arquivos, pd.DataFrame): return arquivos
     ano2 = str(ano)[-2:]
@@ -339,7 +336,10 @@ def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
         if nome.startswith(prefixo_exato) or uf.upper() in nome:
             selecionados.append(caminho)
                 
-    if not selecionados: return []
+    # Fallback V20: Se o filtro for duro demais, deixa os arquivos passarem pro DuckDB decidir
+    if not selecionados and arquivos:
+        return arquivos
+        
     return selecionados
 
 def processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_alvo, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado="Amostra limitada de microdados", prefixo_esperado=None):
@@ -412,13 +412,12 @@ def processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_alvo, sistema, nivel_
                         else:
                             frames.append(leitura_segura_parquet(caminho, limite=50000))
                     else:
-                        # 🌟 REMOVIDA A TRAVA DE 500 MIL LINHAS PARA MUNICÍPIOS!
                         codigo_uf = ESTADOS_IBGE.get(uf, "")
                         col_estado = col_filtro_oco or col_filtro_res
                         if "SINAN" in sistema and nivel_terr == "Estado" and col_estado and codigo_uf:
                             query = f"SELECT * FROM read_parquet('{caminho_sql}') WHERE CAST(\"{col_estado}\" AS VARCHAR) LIKE '{codigo_uf}%' LIMIT 150000"
                         else:
-                            query = f"SELECT * FROM read_parquet('{caminho_sql}')" # Traz 100% dos dados da cidade!
+                            query = f"SELECT * FROM read_parquet('{caminho_sql}')" 
                         df = duckdb.query(query).df()
                         frames.append(df)
                 except Exception as e:
@@ -639,10 +638,7 @@ def tratar_e_traduzir_df(df, sistema):
     cabecalhos["SINASC"] = cab_sinasc
     
     df_tratado = df_tratado.rename(columns=cabecalhos.get(sigla_sistema, {}))
-    
-    # 🌟 CORREÇÃO CRÍTICA: REMOVE COLUNAS DUPLICADAS ANTES DE GERAR A TELA
     df_tratado = df_tratado.loc[:, ~df_tratado.columns.duplicated()]
-    
     return df_tratado
 
 # --- INTERFACE PRINCIPAL ---
@@ -859,15 +855,14 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 else: card_text = f"<h2>{len(df_bruto)} {m_cnes['principal_label'].lower()} processados</h2>"
                             st.markdown(f'<div class="metric-card">{card_text}<p>{sistema_titulo} - {nome_local} ({periodo_label})</p></div>', unsafe_allow_html=True)
                         
-                        if nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Amostra limitada de microdados":
-                            st.warning("Consulta estadual em base pesada. Para preservar o funcionamento do app, a visualização foi limitada a uma amostra de 50.000 registros. Para microdados completos, utilize filtro municipal ou exportação específica.")
-                        
                         tab1, tab2, tab3 = st.tabs(["✅ Planilha Tratada", "⚙️ Planilha Bruta", "📈 Painel de Hospitais e Clínicas" if "CNES" in sistema else "📈 Painel de Análises Clínicas e Perfil"])
+                        
+                        # 🌟 VISUALIZAÇÃO COM SCROLL INFINITO (SEM LIMITADOR NA TELA)
                         with tab1:
-                            st.dataframe(df_tratado.head(100), width="stretch")
+                            st.dataframe(df_tratado, width="stretch")
                             st.download_button("📥 Baixar Tabela TRATADA Completa (CSV)", df_tratado.to_csv(index=False, sep=';', decimal=','), f"tratado_{sistema_titulo}_{nome_local}.csv", "text/csv")
                         with tab2:
-                            st.dataframe(df_bruto.head(100), width="stretch")
+                            st.dataframe(df_bruto, width="stretch")
                             st.download_button("📥 Baixar Tabela BRUTA Completa (CSV)", df_bruto.to_csv(index=False, sep=';', decimal=','), f"bruto_{sistema_titulo}_{nome_local}.csv", "text/csv")
                             
                         with tab3:
@@ -876,14 +871,14 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             else:
                                 df_dash = df_tratado.copy()
                                 
-                                # 🌟 DASHBOARD COM FOCO AUTOMÁTICO (SEM BOLINHAS)
+                                # 🌟 RESTAURAÇÃO DOS BOTÕES DE LENTE EPIDEMIOLÓGICA (PARA TODAS AS BASES)
                                 if nivel_terr == "Município" and "CNES" not in sistema and col_res and col_oco:
                                     st.write("---")
-                                    if "SIH" in sistema:
-                                        st.info("🏥 **Lente Hospitalar/Ocorrência:** Os perfis clínicos e de custos abaixo representam a realidade da Produção dos Hospitais de sua cidade (Todos que foram ATENDIDOS NA CIDADE, morando aí ou não).")
+                                    visao_dash = st.radio("📊 Filtrar análises gráficas abaixo para focar em:", 
+                                                          ["🌐 Universo Total (Ocorrência + Residência)", "🏥 Ocorrência na Cidade", "🏠 Apenas Moradores Locais"], horizontal=True)
+                                    if "Ocorrência" in visao_dash:
                                         df_dash = df_tratado[df_tratado[col_oco].astype(str).str.startswith(id_datasus_alvo[:6])]
-                                    else:
-                                        st.info("🏠 **Lente Epidemiológica/Residência:** O painel abaixo mapeia o perfil exclusivo dos MORADORES DESTA CIDADE, independente de onde o evento tenha ocorrido, para facilitar o planejamento municipal.")
+                                    elif "Moradores" in visao_dash:
                                         df_dash = df_tratado[df_tratado[col_res].astype(str).str.startswith(id_datasus_alvo[:6])]
                                 
                                 if "CNES" not in sistema:
