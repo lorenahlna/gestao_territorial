@@ -1,4 +1,4 @@
-# VERSAO_FINAL_SIH_VISAO_DUPLA_V21
+# VERSAO_FINAL_SIH_FLUXO_PACIENTES_V22
 import streamlit as st
 import pandas as pd
 import requests
@@ -54,7 +54,6 @@ def listar_anos_disponiveis(sistema="GERAL"):
     ano_inicial, ano_final = limites.get(sistema, (1995, ano_atual - 1))
     return list(range(ano_final, ano_inicial - 1, -1))
 
-# 🌟 NOVO: INTELIGÊNCIA DE SELEÇÃO DE COLUNAS (RESIDÊNCIA VS OCORRÊNCIA)
 def obter_colunas_municipio(sistema, grupo=None, tipo_filtro="🏥 Local de Internação/Ocorrência"):
     is_residencia = "Residência" in tipo_filtro
     if "SIH" in sistema:
@@ -142,7 +141,6 @@ def buscar_municipios_por_uf(uf_sigla):
     except:
         return {"Belo Horizonte": {"id7": "3106200", "id6": "310620", "nome": "Belo Horizonte", "uf": "MG"}}
 
-# 🌟 LIMPEZA DE CACHE DO PYSUS
 def limpar_cache_pysus_sih():
     caminhos_cache = [
         os.path.expanduser("~/pysus/downloads/ducklake/sih"),
@@ -152,8 +150,7 @@ def limpar_cache_pysus_sih():
     ]
     for caminho in caminhos_cache:
         if os.path.exists(caminho):
-            try:
-                shutil.rmtree(caminho)
+            try: shutil.rmtree(caminho)
             except: pass
 
 # --- TRATADORES DE DADOS ---
@@ -268,18 +265,12 @@ def baixar_sih_motor_raiz(uf, ano, mes, grupo):
         from pysus.ftp.databases.sih import SIH
         motor_sih = SIH()
         motor_sih.load()
-        
         ano_str = str(ano)[-2:]
         mes_str = f"{int(mes):02d}" if mes else ""
-        
         arquivos_esperados = motor_sih.get_files(dis_group=grupo, uf=uf, year=ano_str, month=mes_str)
-        if not arquivos_esperados:
-            return None
-            
-        arquivos_baixados = motor_sih.download(arquivos_esperados)
-        return arquivos_baixados
-    except Exception as e:
-        return None
+        if not arquivos_esperados: return None
+        return motor_sih.download(arquivos_esperados)
+    except Exception as e: return None
 
 def baixar_sih_validado(uf, ano, mes, grupo):
     max_retries = 3
@@ -287,12 +278,9 @@ def baixar_sih_validado(uf, ano, mes, grupo):
         try:
             from pysus.online_data.SIH import download
             obj = download(uf, int(ano), int(mes), grupo)
-            if hasattr(obj, "to_dataframe"):
-                return obj.to_dataframe()
-            if hasattr(obj, "to_pandas"):
-                return obj.to_pandas()
-            if isinstance(obj, pd.DataFrame):
-                return obj
+            if hasattr(obj, "to_dataframe"): return obj.to_dataframe()
+            if hasattr(obj, "to_pandas"): return obj.to_pandas()
+            if isinstance(obj, pd.DataFrame): return obj
             return obj
         except Exception as e:
             if "RemoteProtocolError" in str(e) or "connection" in str(e).lower():
@@ -314,8 +302,7 @@ def baixar_sih_fallback_api(uf, ano, mes, grupo):
         for tentativa in range(max_retries):
             try:
                 res = api_sih(**param)
-                if res is not None:
-                    return res
+                if res is not None: return res
             except Exception as e:
                 if "RemoteProtocolError" in str(e) or "connection" in str(e).lower():
                     limpar_cache_pysus_sih()
@@ -367,12 +354,10 @@ def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     for caminho in arquivos:
         nome = os.path.basename(str(caminho)).upper()
         if any(nome.startswith(g) for g in outros_grupos): continue
-            
         if nome.startswith(prefixo_exato) or uf.upper() in nome:
             selecionados.append(caminho)
                 
-    if not selecionados:
-        return []
+    if not selecionados: return []
     return selecionados
 
 # --- MOTOR SEMÂNTICO E CONSULTAS DUCKDB ---
@@ -424,7 +409,6 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
                         df = duckdb.query(query).df()
                         frames.append(df)
                     elif nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Resumo agregado":
-                        # 🌟 Respeita a visão de Residência vs Ocorrência no Estado também!
                         col_mun_res = next((c for c in cols_parquet if c.upper() in cols_alvo_upper), None)
                         if not col_mun_res:
                             col_mun_res = next((c for c in cols_parquet if c.upper() in ["MUNIC_RES", "SP_MUNRES", "ID_MN_RESI", "ID_MUNICIP", "CODUFMUN"]), None)
@@ -486,15 +470,11 @@ def gerar_metricas_cnes(df, grupo):
         metricas["principal_value"] = len(df)
     return metricas
 
-# 🌟 ASSINATURA ATUALIZADA PARA RECEBER A VISÃO DUPLA (tipo_filtro_local)
 def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo="", tipo_resultado="Amostra limitada de microdados", tipo_filtro_local="🏥 Local de Internação/Ocorrência"):
     if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     partes_final = [] 
     meses_para_baixar = [mes_num] if mes_num else [None]
-    
-    # Busca a coluna correta baseada no Radio Button selecionado pelo usuário
     cols_alvo = obter_colunas_municipio(sistema, sih_grupo, tipo_filtro_local)
-    
     dt_alvos = ["DTOBITO", "DTNASC", "DT_NOTIFIC", "DT_INTER"]
     falhas = []
     sucessos_download = 0
@@ -514,17 +494,10 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                 limpar_cache_pysus_sih()
 
                 res = None
-                
-                try:
-                    res = baixar_sih_motor_raiz(uf, ano, m, sih_grupo)
-                except Exception:
-                    pass
-                
-                if not res:
-                    res = baixar_sih_validado(uf, ano, m, sih_grupo)
-                    
-                if not res:
-                    res = baixar_sih_fallback_api(uf, ano, m, sih_grupo)
+                try: res = baixar_sih_motor_raiz(uf, ano, m, sih_grupo)
+                except Exception: pass
+                if not res: res = baixar_sih_validado(uf, ano, m, sih_grupo)
+                if not res: res = baixar_sih_fallback_api(uf, ano, m, sih_grupo)
 
                 if res is None:
                     falhas.append(f"SIH SEM REGISTROS OU ARQUIVO NÃO PUBLICADO PELO DATASUS | {uf} {ano}/{m}")
@@ -676,20 +649,22 @@ if aba_ativa == "📋 Guia Principal (Extração)":
     ufs_selecionadas = []; id_ibge_alvo = "1"; id_datasus_alvo = ""
     ufs_ordenadas = sorted(UFS)
 
-    # 🌟 O BOTÃO DE VISÃO DUPLA QUE CRIA A MÁGICA
+    # 🌟 CARREGA O DICIONÁRIO DE CIDADES GLOBALMENTE PARA O GRÁFICO DE FLUXO
+    uf_sel = st.sidebar.selectbox("Selecione o Estado:", ufs_ordenadas, index=ufs_ordenadas.index("MG"))
+    muns_estado = buscar_municipios_por_uf(uf_sel)
+    
+    mapa_ibge = {dados['id6']: nome for nome, dados in muns_estado.items()}
+    for nome, dados in muns_estado.items():
+        mapa_ibge[dados['id7']] = nome
+
     tipo_filtro_local = "🏥 Local de Internação/Ocorrência"
 
     if nivel_terr == "Estado":
-        uf_sel = st.sidebar.selectbox("Selecione o Estado:", ufs_ordenadas, index=ufs_ordenadas.index("MG"))
         ufs_selecionadas = [uf_sel]; id_ibge_alvo = ESTADOS_IBGE[uf_sel]; nome_local = uf_sel
     elif nivel_terr == "Município":
-        uf_sel = st.sidebar.selectbox("Filtrar Estado:", ufs_ordenadas, index=ufs_ordenadas.index("MG"))
-        muns_estado = buscar_municipios_por_uf(uf_sel)
         mun_nome = st.sidebar.selectbox("Selecione o Município:", sorted(muns_estado.keys()))
         dados_mun = muns_estado[mun_nome]
         ufs_selecionadas = [uf_sel]; id_ibge_alvo = dados_mun['id7']; id_datasus_alvo = dados_mun['id6']; nome_local = mun_nome
-        
-        # O gestor pode escolher de que ponto de vista ele quer ver os dados
         tipo_filtro_local = st.sidebar.radio("Considerar município como:", ["🏥 Local de Internação/Ocorrência", "🏠 Local de Residência do Paciente"])
 
     if fonte == "🏥 Saúde (DATASUS)":
@@ -752,7 +727,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                 
             with trava_global:
                 with st.spinner(f"Processando via DuckDB para {nome_local}..."):
-                    # 🌟 ENVIANDO O TIPO DE FILTRO PARA A FUNÇÃO DE BUSCA
                     df_bruto = buscar_datasus_v7(sistema, ufs_selecionadas, ano_sel, mes_sel, agravo_sel, sih_grupo_sel, cnes_grupo_sel, nivel_terr, id_datasus_alvo, tipo_resultado, tipo_filtro_local)
                     
                     if not df_bruto.empty and "Erro" not in df_bruto.columns:
@@ -865,6 +839,30 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     if col_sexo: st.bar_chart(df_tratado[col_sexo].value_counts())
                                     col_raca = next((c for c in df_tratado.columns if "Raça" in c), None)
                                     if col_raca: st.bar_chart(df_tratado[col_raca].value_counts())
+
+                                # 🌟 NOVO MÓDULO: FLUXO DE PACIENTES / MIGRAÇÃO EM SAÚDE
+                                if nivel_terr == "Município" and "CNES" not in sistema:
+                                    st.write("---")
+                                    st.subheader("🗺️ Fluxo de Pacientes (Migração em Saúde)")
+                                    
+                                    col_res = next((c for c in df_tratado.columns if c in ["MUNIC_RES", "SP_MUNRES", "CODMUNRES", "ID_MN_RESI"]), None)
+                                    col_oco = next((c for c in df_tratado.columns if c in ["MUNIC_MOV", "SP_MUNMOV", "CODMUNOCOR", "CODMUNNASC", "ID_MUNICIP", "CODUFMUN", "SP_MUNIC", "GESTOR_COD"]), None)
+
+                                    if "Internação" in tipo_filtro_local and col_res:
+                                        st.write(f"**De onde vieram os pacientes atendidos em {nome_local}?** (Top 15 Origens)")
+                                        df_fluxo = df_tratado[col_res].value_counts().reset_index()
+                                        df_fluxo.columns = ['IBGE', 'Pacientes']
+                                        df_fluxo['Município de Origem'] = df_fluxo['IBGE'].astype(str).str[:6].map(mapa_ibge).fillna("Outro Estado / Desconhecido")
+                                        df_fluxo = df_fluxo.groupby('Município de Origem')['Pacientes'].sum().sort_values(ascending=False).head(15)
+                                        st.bar_chart(df_fluxo)
+                                        
+                                    elif "Residência" in tipo_filtro_local and col_oco:
+                                        st.write(f"**Para onde os moradores de {nome_local} viajaram para ser atendidos?** (Top 15 Destinos)")
+                                        df_fluxo = df_tratado[col_oco].value_counts().reset_index()
+                                        df_fluxo.columns = ['IBGE', 'Pacientes']
+                                        df_fluxo['Município de Destino'] = df_fluxo['IBGE'].astype(str).str[:6].map(mapa_ibge).fillna("Outro Estado / Desconhecido")
+                                        df_fluxo = df_fluxo.groupby('Município de Destino')['Pacientes'].sum().sort_values(ascending=False).head(15)
+                                        st.bar_chart(df_fluxo)
                     else:
                         msg = df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados disponíveis."
                         if "território, período ou agravo" in msg:
