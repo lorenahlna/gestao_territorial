@@ -1,4 +1,4 @@
-# VERSAO_FINAL_PRODUCAO_SUPER_DASHBOARD_V31
+# VERSAO_FINAL_PRODUCAO_SUPER_DASHBOARD_V32
 import streamlit as st
 import pandas as pd
 import requests
@@ -51,7 +51,6 @@ def listar_anos_disponiveis(sistema="GERAL"):
     ano_inicial, ano_final = limites.get(sistema, (1995, ano_atual - 1))
     return list(range(ano_final, ano_inicial - 1, -1))
 
-# 🌟 DICIONÁRIO DE COLUNAS TERRITORIAIS (COM SINÔNIMOS DO SP INCLUÍDOS)
 def obter_colunas_territoriais(sistema, grupo=None):
     if "SIH" in sistema:
         if grupo == "SP": return {"res": ["SP_MUNRES", "MUNIC_RES"], "oco": ["SP_MUNIC", "SP_GESTOR", "SP_MUNMOV", "MUNIC_MOV", "GESTOR_COD"]}
@@ -182,6 +181,30 @@ def decodificar_sigtap(codigo, dict_sigtap):
     if dict_sigtap and cod in dict_sigtap: return f"{cod} - {dict_sigtap[cod]}"
     return cod
 
+def decodificar_tp_unid(codigo):
+    dic_unid = {
+        "01": "Posto de Saúde", "02": "Centro de Saúde / Unidade Básica", "04": "Policlínica",
+        "05": "Hospital Geral", "07": "Hospital Especializado", "15": "Unidade Mista",
+        "20": "Pronto Socorro Geral", "21": "Pronto Socorro Especializado", "22": "Consultório Isolado",
+        "32": "Unidade Móvel Fluvial", "36": "Clínica / Centro de Especialidade",
+        "39": "Unidade de Apoio Diagnose e Terapia — SADT Isolado", "40": "Unidade Móvel Terrestre",
+        "42": "Unidade Móvel de Nível Pré-Hospitalar na Área de Urgência", "43": "Farmácia",
+        "50": "Unidade de Vigilância em Saúde", "60": "Cooperativa ou Empresa de Cessão de Trabalhadores na Saúde",
+        "61": "Centro de Parto Normal — Isolado", "62": "Hospital/Dia — Isolado",
+        "67": "Laboratório Central de Saúde Pública — LACEN", "68": "Central de Gestão em Saúde",
+        "69": "Centro de Atenção Hemoterápica e/ou Hematológica", "70": "Centro de Atenção Psicossocial — CAPS",
+        "71": "Centro de Apoio à Saúde da Família", "72": "Unidade de Atenção à Saúde Indígena",
+        "73": "Pronto Atendimento", "74": "Polo Academia da Saúde", "75": "Telessaúde",
+        "76": "Central de Regulação Médica das Urgências", "77": "Serviço de Atenção Domiciliar Isolado — Home Care",
+        "78": "Unidade de Atenção em Regime Residencial", "79": "Oficina Ortopédica",
+        "80": "Laboratório de Saúde Pública", "81": "Central de Regulação do Acesso",
+        "82": "Central de Notificação, Captação e Distribuição de Órgãos Estadual",
+        "83": "Polo de Prevenção de Doenças e Agravos e Promoção da Saúde",
+        "84": "Central de Abastecimento", "85": "Centro de Imunização"
+    }
+    cod_str = str(codigo).strip().zfill(2)
+    return dic_unid.get(cod_str, f"{cod_str} - Ignorado/Outros")
+
 def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo_dict, dt_alvos, grupo=None):
     try:
         df_t = df_t.copy()
@@ -211,10 +234,10 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
             
             if col_filtro_res:
                 df_t.loc[:, col_filtro_res] = df_t[col_filtro_res].apply(normalizar_codigo)
-                mask_res = df_t[col_filtro_res].str.startswith(id_datasus_alvo)
+                mask_res = df_t[col_filtro_res].str.startswith(id_datasus_alvo[:6])
             if col_filtro_oco:
                 df_t.loc[:, col_filtro_oco] = df_t[col_filtro_oco].apply(normalizar_codigo)
-                mask_oco = df_t[col_filtro_oco].str.startswith(id_datasus_alvo)
+                mask_oco = df_t[col_filtro_oco].str.startswith(id_datasus_alvo[:6])
                 
             df_t = df_t[mask_res | mask_oco].copy()
         
@@ -320,7 +343,6 @@ def normalizar_lista_arquivos_pysus(res):
     if hasattr(res, "path"): return [str(res.path)]
     return [str(res)]
 
-# 🌟 RESTAURAÇÃO DA LÓGICA V20 PARA O SIH-SP
 def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     if isinstance(arquivos, pd.DataFrame): return arquivos
     ano2 = str(ano)[-2:]
@@ -328,14 +350,13 @@ def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     prefixo_exato = f"{grupo.upper()}{uf.upper()}{ano2}{mes2}"
     
     selecionados = []
+    outros_grupos = {"RD", "SP", "ER", "CM", "RJ", "CH"} - {grupo.upper()}
+    
     for caminho in arquivos:
         nome = os.path.basename(str(caminho)).upper()
-        if grupo.upper() == "RD":
-            if any(nome.startswith(g) for g in ["SP", "ER", "CM", "RJ", "CH"]): continue
-            if uf.upper() in nome: selecionados.append(caminho)
-        else:
-            if nome.startswith(prefixo_exato) or (grupo.upper() in nome and uf.upper() in nome):
-                selecionados.append(caminho)
+        if any(nome.startswith(g) for g in outros_grupos): continue
+        if nome.startswith(prefixo_exato) or uf.upper() in nome:
+            selecionados.append(caminho)
                 
     if not selecionados and arquivos:
         return arquivos
@@ -366,9 +387,9 @@ def processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_alvo, sistema, nivel_
                 if prefixo_esperado and sistema == "Internações (SIH)":
                     prefixo = str(prefixo_esperado).upper()
                     grupo_solicitado = prefixo[:2]
-                    if grupo_solicitado == "RD":
-                        if any(nome_arquivo.startswith(g) for g in ["SP", "ER", "CM", "RJ", "CH"]): continue
-                        if uf.upper() not in nome_arquivo: continue
+                    outros_grupos = {"RD", "SP", "ER", "CM", "RJ", "CH"} - {grupo_solicitado}
+                    if any(nome_arquivo.startswith(g) for g in outros_grupos): continue
+                    if uf.upper() not in nome_arquivo: continue
 
                 arquivos_lidos += 1
                 caminho_sql = caminho.replace("'", "''")
@@ -382,7 +403,7 @@ def processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_alvo, sistema, nivel_
                     col_filtro_oco = next((c for c in cols_parquet if c.upper() in cols_oco), None)
 
                     if id_alvo and nivel_terr == "Município":
-                        id_sql = str(id_alvo).replace("'", "''")
+                        id_sql = str(id_alvo).replace("'", "''")[:6]
                         where_clauses = []
                         if col_filtro_res: where_clauses.append(f"CAST(\"{col_filtro_res}\" AS VARCHAR) LIKE '{id_sql}%'")
                         if col_filtro_oco: where_clauses.append(f"CAST(\"{col_filtro_oco}\" AS VARCHAR) LIKE '{id_sql}%'")
@@ -567,6 +588,7 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
             return pd.DataFrame({"Erro": ["Falha de conexão ou arquivo inexistente no DATASUS para os filtros selecionados."] })
     return pd.concat(partes_final, ignore_index=True)
 
+# 🌟 TRATAMENTO DE VARIAVEIS E DECODIFICADORES INTELIGENTES
 def tratar_e_traduzir_df(df, sistema):
     df_tratado = df.copy()
     df_tratado.columns = [str(c).upper().strip() for c in df_tratado.columns]
@@ -607,6 +629,10 @@ def tratar_e_traduzir_df(df, sistema):
     if "NO_FANTASIA" in df_tratado.columns: df_tratado["Nome Unidade"] = df_tratado["NO_FANTASIA"]
     if "VINC_SUS" in df_tratado.columns: 
         df_tratado["Atende SUS?"] = df_tratado["VINC_SUS"].astype(str).str.replace('.0','', regex=False).map({"1": "Sim", "0": "Não"}).fillna("Não Informado")
+    
+    # 🌟 NOVO CNES: Tradução do Tipo de Estabelecimento
+    if "TP_UNID" in df_tratado.columns:
+        df_tratado["Tipo de Estabelecimento"] = df_tratado["TP_UNID"].apply(decodificar_tp_unid)
 
     if "LOCOCOR" in df_tratado.columns:
         dic_lococor = {"1": "Hospital", "2": "Outro estab. saúde", "3": "Domicílio", "4": "Via Pública", "5": "Outros", "9": "Ignorado"}
@@ -854,7 +880,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                         
                         tab1, tab2, tab3 = st.tabs(["✅ Planilha Tratada", "⚙️ Planilha Bruta", "📈 Painel de Hospitais e Clínicas" if "CNES" in sistema else "📈 Painel Analítico"])
                         
-                        # 🌟 VISUALIZAÇÃO COM SCROLL INFINITO (SEM LIMITADOR DE LINHAS)
                         with tab1:
                             st.dataframe(df_tratado, width="stretch")
                             st.download_button("📥 Baixar Tabela TRATADA Completa (CSV)", df_tratado.to_csv(index=False, sep=';', decimal=','), f"tratado_{sistema_titulo}_{nome_local}.csv", "text/csv")
@@ -868,14 +893,11 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             else:
                                 df_dash = df_tratado.copy()
                                 
-                                # 🌟 DASHBOARD AUTOMÁTICO BASEADO NA NATUREZA DO SISTEMA
+                                # 🌟 FOCO AUTOMÁTICO DO DASHBOARD (Sem botões extras)
                                 if nivel_terr == "Município" and "CNES" not in sistema and col_res and col_oco:
-                                    st.write("---")
                                     if "SIH" in sistema:
-                                        st.info("🏥 **Lente Hospitalar/Ocorrência:** Os perfis clínicos e de custos abaixo representam a realidade dos ATENDIDOS NA CIDADE.")
                                         df_dash = df_tratado[df_tratado[col_oco].astype(str).str.startswith(id_datasus_alvo[:6])]
                                     else:
-                                        st.info("🏠 **Lente Epidemiológica/Residência:** O painel abaixo mapeia o perfil exclusivo dos MORADORES DESTA CIDADE (A base de saúde pública da sua população).")
                                         df_dash = df_tratado[df_tratado[col_res].astype(str).str.startswith(id_datasus_alvo[:6])]
                                 
                                 if "CNES" not in sistema:
@@ -919,13 +941,13 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     if cnes_grupo_sel == "ST":
                                         c1, c2 = st.columns([1, 2])
                                         with c1:
-                                            st.write("**Atende ao SUS?**")
-                                            if "Atende SUS?" in df_dash.columns: st.bar_chart(df_dash["Atende SUS?"].value_counts())
+                                            st.write("**Tipos de Estabelecimentos (Top 10)**")
+                                            if "Tipo de Estabelecimento" in df_dash.columns: st.bar_chart(df_dash["Tipo de Estabelecimento"].value_counts().head(10))
                                         with c2:
                                             st.write("**Top 15 Maiores Estabelecimentos da Cidade**")
-                                            st.caption("🔍 Você pode consultar os detalhes de cada hospital pelo código CNES no site oficial: https://cnes.datasus.gov.br/pages/estabelecimentos/consulta.jsp")
+                                            st.caption("🔍 Consulte os detalhes pelo código CNES em: https://cnes.datasus.gov.br/pages/estabelecimentos/consulta.jsp")
                                             if "Nome Unidade" in df_dash.columns:
-                                                st.dataframe(df_dash[["CNES", "Nome Unidade", "Atende SUS?"]].head(15), use_container_width=True)
+                                                st.dataframe(df_dash[["CNES", "Nome Unidade", "Atende SUS?", "Tipo de Estabelecimento"]].head(15), use_container_width=True)
                                             else:
                                                 st.dataframe(df_dash[["CNES"]].head(15), use_container_width=True)
                                     elif cnes_grupo_sel == "LT":
