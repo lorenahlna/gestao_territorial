@@ -1,4 +1,4 @@
-# VERSAO_FINAL_PRODUCAO_SUPER_DASHBOARD_V33
+# VERSAO_FINAL_PRODUCAO_SUPER_DASHBOARD_V36
 import streamlit as st
 import pandas as pd
 import requests
@@ -51,14 +51,14 @@ def listar_anos_disponiveis(sistema="GERAL"):
     ano_inicial, ano_final = limites.get(sistema, (1995, ano_atual - 1))
     return list(range(ano_final, ano_inicial - 1, -1))
 
-# 🌟 RADAR EXPANDIDO DE COLUNAS TERRITORIAIS (BLINDADO)
+# 🌟 DICIONÁRIO DE COLUNAS TERRITORIAIS CIRURGICAMENTE CORRIGIDO
 def obter_colunas_territoriais(sistema, grupo=None):
     if "SIH" in sistema:
-        if grupo == "SP": return {"res": ["SP_MUNRES", "MUNIC_RES", "MUN_RES"], "oco": ["SP_MUNIC", "SP_MUNMOV", "SP_GESTOR", "MUNIC_MOV", "GESTOR_COD"]}
+        if grupo == "SP": return {"res": ["SP_MUNRES", "MUNIC_RES", "MUN_RES"], "oco": ["SP_MUNIC", "SP_MUNMOV", "MUNIC_MOV", "GESTOR_COD"]}
         return {"res": ["MUNIC_RES"], "oco": ["MUNIC_MOV", "GESTOR_COD"]}
-    if "SIM" in sistema: return {"res": ["CODMUNRES", "MUNIC_RES"], "oco": ["CODMUNOCOR", "CODMUNCART", "MUNIC_OCO", "MUNIC_MOV"]}
-    if "SINASC" in sistema: return {"res": ["CODMUNRES", "MUNIC_RES"], "oco": ["CODMUNNASC", "CODMUNESTAB", "COMUNESTAB", "MUNIC_MOV"]}
-    if "SINAN" in sistema: return {"res": ["ID_MN_RESI"], "oco": ["ID_MUNICIP", "ID_UNIDADE"]}
+    if "SIM" in sistema: return {"res": ["CODMUNRES"], "oco": ["CODMUNOCO", "CODMUNOCOR"]}
+    if "SINASC" in sistema: return {"res": ["CODMUNRES"], "oco": ["CODMUNNASC", "CODMUNESTAB", "COMUNESTAB"]}
+    if "SINAN" in sistema: return {"res": ["ID_MN_RESI"], "oco": ["ID_MUNICIP"]}
     if "CNES" in sistema: return {"res": ["CODUFMUN"], "oco": ["CODUFMUN"]}
     return {"res": [], "oco": []}
 
@@ -73,7 +73,9 @@ def carregar_dicionarios_github():
     except Exception as e:
         return {
             "CBO_ESPECIFICOS": {"2251": "Médicos clínicos", "2235": "Enfermeiros"},
-            "CBO_SUBGRUPOS": {"01": "Forças Armadas", "11": "Dirigentes", "22": "Profissionais de Saúde"}
+            "CBO_SUBGRUPOS": {"01": "Forças Armadas", "11": "Dirigentes", "22": "Profissionais de Saúde"},
+            "DICIONARIOS_VALORES": {"SIM": {"SEXO": {"1": "Masculino", "2": "Feminino"}}},
+            "TRADUCAO_CABECALHOS": {"SIM": {"CAUSABAS": "Causa Básica (CID-10)"}}
         }
 
 CONFIG_APP = carregar_dicionarios_github()
@@ -182,27 +184,25 @@ def decodificar_sigtap(codigo, dict_sigtap):
 
 def decodificar_tp_unid(codigo):
     dic_unid = {
-        "01": "Posto de Saúde", "02": "Centro de Saúde / Unidade Básica", "04": "Policlínica",
+        "01": "Posto de Saúde", "02": "Centro de Saúde / UBS", "04": "Policlínica",
         "05": "Hospital Geral", "07": "Hospital Especializado", "15": "Unidade Mista",
         "20": "Pronto Socorro Geral", "21": "Pronto Socorro Especializado", "22": "Consultório Isolado",
         "32": "Unidade Móvel Fluvial", "36": "Clínica / Centro de Especialidade",
-        "39": "Unidade de Apoio Diagnose e Terapia — SADT Isolado", "40": "Unidade Móvel Terrestre",
-        "42": "Unidade Móvel de Nível Pré-Hospitalar na Área de Urgência", "43": "Farmácia",
-        "50": "Unidade de Vigilância em Saúde", "60": "Cooperativa ou Empresa de Cessão de Trabalhadores na Saúde",
-        "61": "Centro de Parto Normal — Isolado", "62": "Hospital/Dia — Isolado",
-        "67": "Laboratório Central de Saúde Pública — LACEN", "68": "Central de Gestão em Saúde",
-        "69": "Centro de Atenção Hemoterápica e/ou Hematológica", "70": "Centro de Atenção Psicossocial — CAPS",
-        "71": "Centro de Apoio à Saúde da Família", "72": "Unidade de Atenção à Saúde Indígena",
+        "39": "Unidade de Apoio Diagnose e Terapia", "40": "Unidade Móvel Terrestre",
+        "42": "Unidade Móvel Pré-Hospitalar (Urgência)", "43": "Farmácia",
+        "50": "Unidade de Vigilância em Saúde", "60": "Cooperativa",
+        "61": "Centro de Parto Normal", "62": "Hospital/Dia",
+        "67": "Laboratório Central (LACEN)", "68": "Central de Gestão em Saúde",
+        "69": "Centro de Atenção Hemoterápica", "70": "Centro de Atenção Psicossocial (CAPS)",
+        "71": "Centro de Apoio à Saúde da Família", "72": "Atenção à Saúde Indígena",
         "73": "Pronto Atendimento", "74": "Polo Academia da Saúde", "75": "Telessaúde",
-        "76": "Central de Regulação Médica das Urgências", "77": "Serviço de Atenção Domiciliar Isolado — Home Care",
-        "78": "Unidade de Atenção em Regime Residencial", "79": "Oficina Ortopédica",
+        "76": "Central de Regulação Urgências", "77": "Atenção Domiciliar (Home Care)",
+        "78": "Atenção em Regime Residencial", "79": "Oficina Ortopédica",
         "80": "Laboratório de Saúde Pública", "81": "Central de Regulação do Acesso",
-        "82": "Central de Notificação, Captação e Distribuição de Órgãos Estadual",
-        "83": "Polo de Prevenção de Doenças e Agravos e Promoção da Saúde",
-        "84": "Central de Abastecimento", "85": "Centro de Imunização"
+        "83": "Polo Promoção da Saúde", "85": "Centro de Imunização"
     }
     cod_str = str(codigo).strip().zfill(2)
-    return dic_unid.get(cod_str, f"{cod_str} - Ignorado/Outros")
+    return dic_unid.get(cod_str, f"{cod_str} - Outros")
 
 def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo_dict, dt_alvos, grupo=None):
     try:
@@ -232,9 +232,11 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
             mask_oco = pd.Series([False] * len(df_t), index=df_t.index)
             
             if col_filtro_res:
-                mask_res = df_t[col_filtro_res].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])
+                df_t[col_filtro_res] = df_t[col_filtro_res].apply(normalizar_codigo)
+                mask_res = df_t[col_filtro_res].str.startswith(id_datasus_alvo[:6])
             if col_filtro_oco:
-                mask_oco = df_t[col_filtro_oco].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])
+                df_t[col_filtro_oco] = df_t[col_filtro_oco].apply(normalizar_codigo)
+                mask_oco = df_t[col_filtro_oco].str.startswith(id_datasus_alvo[:6])
                 
             df_t = df_t[mask_res | mask_oco].copy()
         
@@ -340,7 +342,6 @@ def normalizar_lista_arquivos_pysus(res):
     if hasattr(res, "path"): return [str(res.path)]
     return [str(res)]
 
-# 🌟 SIH-SP: LOGICA RESTAURADA DO CODIGO ESTÁVEL V20
 def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     if isinstance(arquivos, pd.DataFrame): return arquivos
     ano2 = str(ano)[-2:]
@@ -352,12 +353,9 @@ def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     
     for caminho in arquivos:
         nome = os.path.basename(str(caminho)).upper()
-        if grupo.upper() == "RD":
-            if any(nome.startswith(g) for g in ["SP", "ER", "CM", "RJ", "CH"]): continue
-            if uf.upper() in nome: selecionados.append(caminho)
-        else:
-            if nome.startswith(prefixo_exato) or (grupo.upper() in nome and uf.upper() in nome):
-                selecionados.append(caminho)
+        if any(nome.startswith(g) for g in outros_grupos): continue
+        if nome.startswith(prefixo_exato) or uf.upper() in nome:
+            selecionados.append(caminho)
                 
     if not selecionados and arquivos:
         return arquivos
@@ -589,7 +587,6 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
             return pd.DataFrame({"Erro": ["Falha de conexão ou arquivo inexistente no DATASUS para os filtros selecionados."] })
     return pd.concat(partes_final, ignore_index=True)
 
-# 🌟 TRATAMENTO DE VARIAVEIS (CBO, CID, IDADE, BAIRRO)
 def tratar_e_traduzir_df(df, sistema):
     df_tratado = df.copy()
     df_tratado.columns = [str(c).upper().strip() for c in df_tratado.columns]
@@ -629,7 +626,6 @@ def tratar_e_traduzir_df(df, sistema):
     if "FANTASIA" in df_tratado.columns: df_tratado["Nome Unidade"] = df_tratado["FANTASIA"]
     if "NO_FANTASIA" in df_tratado.columns: df_tratado["Nome Unidade"] = df_tratado["NO_FANTASIA"]
     
-    # 🌟 NOVO CNES: Identificação precisa do SUS e dos Tipos de Estabelecimento
     col_sus = next((c for c in df_tratado.columns if c in ["VINC_SUS", "ATENDE_SUS", "CONVENIO_SUS"]), None)
     if col_sus: 
         df_tratado["Atende SUS?"] = df_tratado[col_sus].astype(str).str.replace('.0','', regex=False).map({"1": "Sim", "0": "Não", "S": "Sim", "N": "Não"}).fillna("Não Informado")
@@ -637,16 +633,16 @@ def tratar_e_traduzir_df(df, sistema):
     if "TP_UNID" in df_tratado.columns:
         df_tratado["Tipo de Estabelecimento"] = df_tratado["TP_UNID"].apply(decodificar_tp_unid)
 
-    # 🌟 SIM: Recriação dos Dicionários de Óbito
-    dic_circ = {"1": "Acidente", "2": "Suicídio", "3": "Homicídio", "4": "Outros", "9": "Ignorado"}
-    col_circ = next((c for c in df_tratado.columns if c in ["CIRCOBITO"]), None)
-    if col_circ:
-        df_tratado["Circunstância do Óbito"] = df_tratado[col_circ].astype(str).str.replace(".0", "", regex=False).map(dic_circ).fillna("Natural/Outra")
-        
-    dic_lococor = {"1": "Hospital", "2": "Outro estab. saúde", "3": "Domicílio", "4": "Via Pública", "5": "Outros", "9": "Ignorado"}
-    col_loc = next((c for c in df_tratado.columns if c in ["LOCOCOR"]), None)
-    if col_loc:
-        df_tratado["Local de Ocorrência"] = df_tratado[col_loc].astype(str).str.replace(".0", "", regex=False).map(dic_lococor).fillna("Ignorado/Outros")
+    if "SIM" in sistema:
+        dic_circ = {"1": "Acidente", "2": "Suicídio", "3": "Homicídio", "4": "Outros", "9": "Ignorado"}
+        col_circ = next((c for c in df_tratado.columns if c in ["CIRCOBITO"]), None)
+        if col_circ:
+            df_tratado["Circunstância do Óbito"] = df_tratado[col_circ].astype(str).str.replace(".0", "", regex=False).map(dic_circ).fillna("Natural/Não se Aplica")
+            
+        dic_lococor = {"1": "Hospital", "2": "Outro estab. saúde", "3": "Domicílio", "4": "Via Pública", "5": "Outros", "9": "Ignorado"}
+        col_loc = next((c for c in df_tratado.columns if c in ["LOCOCOR"]), None)
+        if col_loc:
+            df_tratado["Local de Ocorrência"] = df_tratado[col_loc].astype(str).str.replace(".0", "", regex=False).map(dic_lococor).fillna("Ignorado/Outros")
 
     for c_vbo in ["OCUP", "OCUPMAE", "CODOCUPMAE", "ID_OCUPA_N", "COD_CBO"]:
         if c_vbo in df_tratado.columns: df_tratado[c_vbo] = df_tratado[c_vbo].apply(decodificar_cbo)
@@ -803,8 +799,11 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 txt_res_desc = "População local"
                             
                             if col_oco and col_res:
-                                mask_res = df_tratado[col_res].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])
-                                mask_oco = df_tratado[col_oco].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])
+                                df_tratado[col_res] = df_tratado[col_res].apply(normalizar_codigo)
+                                df_tratado[col_oco] = df_tratado[col_oco].apply(normalizar_codigo)
+
+                                mask_res = df_tratado[col_res].astype(str).str.startswith(id_datasus_alvo[:6])
+                                mask_oco = df_tratado[col_oco].astype(str).str.startswith(id_datasus_alvo[:6])
                                 
                                 vol_oco = mask_oco.sum()
                                 vol_res = mask_res.sum()
@@ -845,7 +844,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 st.markdown("### 🗺️ Raio-X do Fluxo Geográfico (Migração de Pacientes/Eventos)")
                                 col_mig1, col_mig2 = st.columns(2)
                                 with col_mig1:
-                                    st.markdown(f"**🏥 Eventos ocorridos em {nome_local} ({vol_oco}):**")
+                                    st.markdown(f"**🏥 Eventos e Pessoas ocorridas em {nome_local} ({vol_oco}):**")
                                     st.write(f"- 🏠 **{vol_ambos}** referem-se a moradores da própria cidade.")
                                     st.write(f"- 🚑 **{vol_oco_fora}** vieram/são de fora. **De onde eles vieram?**")
                                     if vol_oco_fora > 0:
@@ -856,7 +855,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                         st.info("Nenhuma ocorrência de pessoa de fora registrada na cidade.")
                                         
                                 with col_mig2:
-                                    st.markdown(f"**🏠 Moradores de {nome_local} na base ({vol_res}):**")
+                                    st.markdown(f"**🏠 Moradores de {nome_local} registrados na base ({vol_res}):**")
                                     st.write(f"- 🏥 **{vol_ambos}** permaneceram e foram assistidos na própria cidade.")
                                     st.write(f"- 🚑 **{vol_res_fora}** viajaram/ocorreram fora. **Para onde eles foram?**")
                                     if vol_res_fora > 0:
@@ -867,8 +866,8 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                         st.info("Nenhum morador precisou sair da cidade (Não há evasão).")
 
                             elif col_oco and not col_res:
-                                st.warning("⚠️ **Aviso Técnico:** Este arquivo de faturamento do Governo (neste grupo/ano) não informou a residência dos pacientes, apenas o local do Hospital/Ocorrência. O mapa de migração foi desabilitado para esta extração.")
-                                mask_oco = df_tratado[col_oco].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])
+                                st.warning("⚠️ **Aviso Técnico:** Este arquivo do Governo (neste grupo/ano) não informou a residência, apenas o local do Hospital/Ocorrência. O mapa de migração foi desabilitado para esta extração.")
+                                mask_oco = df_tratado[col_oco].apply(normalizar_codigo).astype(str).str.startswith(id_datasus_alvo[:6])
                                 vol_oco = mask_oco.sum()
                                 st.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 {txt_oco}</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2><p>Ocorrência / Produção Local</p></div>', unsafe_allow_html=True)
                             else:
@@ -890,7 +889,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                         
                         tab1, tab2, tab3 = st.tabs(["✅ Planilha Tratada", "⚙️ Planilha Bruta", "📈 Painel de Hospitais e Clínicas" if "CNES" in sistema else "📈 Painel Analítico"])
                         
-                        # 🌟 VISUALIZAÇÃO COM SCROLL INFINITO (SEM CORTES)
                         with tab1:
                             st.dataframe(df_tratado, width="stretch")
                             st.download_button("📥 Baixar Tabela TRATADA Completa (CSV)", df_tratado.to_csv(index=False, sep=';', decimal=','), f"tratado_{sistema_titulo}_{nome_local}.csv", "text/csv")
@@ -905,15 +903,13 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 df_dash = df_tratado.copy()
                                 
                                 # 🌟 FOCO AUTOMÁTICO DO DASHBOARD (Sem bolinhas interativas)
-                                if nivel_terr == "Município" and "CNES" not in sistema:
+                                if nivel_terr == "Município" and "CNES" not in sistema and col_res and col_oco:
                                     if "SIH" in sistema:
-                                        if col_oco:
-                                            st.info("🏥 **Lente Hospitalar/Ocorrência:** Os perfis clínicos e de custos abaixo focam nos **ATENDIDOS NA CIDADE**, mostrando a real produção dos hospitais locais.")
-                                            df_dash = df_tratado[df_tratado[col_oco].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])]
+                                        st.info("🏥 **Lente Hospitalar/Ocorrência:** Os perfis clínicos e de custos abaixo focam nos **ATENDIDOS NA CIDADE** (produção local).")
+                                        df_dash = df_tratado[df_tratado[col_oco].astype(str).str.startswith(id_datasus_alvo[:6])]
                                     else:
-                                        if col_res:
-                                            st.info("🏠 **Lente Epidemiológica/Residência:** O painel abaixo foca exclusivamente na saúde dos **MORADORES DESTA CIDADE**, para facilitar o planejamento municipal e vacinal.")
-                                            df_dash = df_tratado[df_tratado[col_res].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])]
+                                        st.info("🏠 **Lente Epidemiológica/Residência:** O painel abaixo foca na saúde dos **MORADORES DA CIDADE**, para o planejamento local.")
+                                        df_dash = df_tratado[df_tratado[col_res].astype(str).str.startswith(id_datasus_alvo[:6])]
                                 
                                 if "CNES" not in sistema:
                                     st.subheader(f"Perfil Demográfico/Clínico: {sistema_titulo}")
