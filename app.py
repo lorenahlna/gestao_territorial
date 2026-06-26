@@ -1,4 +1,4 @@
-# VERSAO_FINAL_PRODUCAO_SUPER_DASHBOARD_V30
+# VERSAO_FINAL_PRODUCAO_SUPER_DASHBOARD_V31
 import streamlit as st
 import pandas as pd
 import requests
@@ -51,10 +51,10 @@ def listar_anos_disponiveis(sistema="GERAL"):
     ano_inicial, ano_final = limites.get(sistema, (1995, ano_atual - 1))
     return list(range(ano_final, ano_inicial - 1, -1))
 
-# 🌟 DICIONÁRIO DE COLUNAS TERRITORIAIS
+# 🌟 DICIONÁRIO DE COLUNAS TERRITORIAIS (COM SINÔNIMOS DO SP INCLUÍDOS)
 def obter_colunas_territoriais(sistema, grupo=None):
     if "SIH" in sistema:
-        if grupo == "SP": return {"res": ["SP_MUNRES", "MUNIC_RES"], "oco": ["SP_MUNIC", "SP_MUNMOV", "MUNIC_MOV", "GESTOR_COD"]}
+        if grupo == "SP": return {"res": ["SP_MUNRES", "MUNIC_RES"], "oco": ["SP_MUNIC", "SP_GESTOR", "SP_MUNMOV", "MUNIC_MOV", "GESTOR_COD"]}
         return {"res": ["MUNIC_RES"], "oco": ["MUNIC_MOV", "GESTOR_COD"]}
     if "SIM" in sistema: return {"res": ["CODMUNRES"], "oco": ["CODMUNOCOR", "CODMUNCART"]}
     if "SINASC" in sistema: return {"res": ["CODMUNRES"], "oco": ["CODMUNNASC", "CODMUNESTAB", "COMUNESTAB"]}
@@ -320,7 +320,7 @@ def normalizar_lista_arquivos_pysus(res):
     if hasattr(res, "path"): return [str(res.path)]
     return [str(res)]
 
-# 🌟 CORREÇÃO DO SP: REDE DE SEGURANÇA RESTAURADA (V20)
+# 🌟 RESTAURAÇÃO DA LÓGICA V20 PARA O SIH-SP
 def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     if isinstance(arquivos, pd.DataFrame): return arquivos
     ano2 = str(ano)[-2:]
@@ -328,18 +328,17 @@ def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     prefixo_exato = f"{grupo.upper()}{uf.upper()}{ano2}{mes2}"
     
     selecionados = []
-    outros_grupos = {"RD", "SP", "ER", "CM", "RJ", "CH"} - {grupo.upper()}
-    
     for caminho in arquivos:
         nome = os.path.basename(str(caminho)).upper()
-        if any(nome.startswith(g) for g in outros_grupos): continue
-        if nome.startswith(prefixo_exato) or uf.upper() in nome:
-            selecionados.append(caminho)
+        if grupo.upper() == "RD":
+            if any(nome.startswith(g) for g in ["SP", "ER", "CM", "RJ", "CH"]): continue
+            if uf.upper() in nome: selecionados.append(caminho)
+        else:
+            if nome.startswith(prefixo_exato) or (grupo.upper() in nome and uf.upper() in nome):
+                selecionados.append(caminho)
                 
-    # Fallback V20: Se o filtro for duro demais, deixa os arquivos passarem pro DuckDB decidir
     if not selecionados and arquivos:
         return arquivos
-        
     return selecionados
 
 def processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_alvo, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado="Amostra limitada de microdados", prefixo_esperado=None):
@@ -367,9 +366,9 @@ def processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_alvo, sistema, nivel_
                 if prefixo_esperado and sistema == "Internações (SIH)":
                     prefixo = str(prefixo_esperado).upper()
                     grupo_solicitado = prefixo[:2]
-                    outros_grupos = {"RD", "SP", "ER", "CM", "RJ", "CH"} - {grupo_solicitado}
-                    if any(nome_arquivo.startswith(g) for g in outros_grupos): continue
-                    if uf.upper() not in nome_arquivo: continue
+                    if grupo_solicitado == "RD":
+                        if any(nome_arquivo.startswith(g) for g in ["SP", "ER", "CM", "RJ", "CH"]): continue
+                        if uf.upper() not in nome_arquivo: continue
 
                 arquivos_lidos += 1
                 caminho_sql = caminho.replace("'", "''")
@@ -767,8 +766,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 txt_oco_desc = "Hospitais locais"
                                 txt_res_desc = "População local"
                             
-                            vol_total = len(df_tratado)
-                            
                             if col_oco and col_res:
                                 mask_res = df_tratado[col_res].astype(str).str.startswith(id_datasus_alvo[:6])
                                 mask_oco = df_tratado[col_oco].astype(str).str.startswith(id_datasus_alvo[:6])
@@ -804,10 +801,9 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     c3.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>🏠 {txt_res}</h4><h2 style="color:#28a745; margin:0;">{vol_res:,}</h2><p>{txt_res_desc}</p></div>', unsafe_allow_html=True)
                                     c4.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>💰 CUSTO RESIDÊNCIA</h4><h2 style="color:#28a745; margin:0;">{f_br(custo_res)}</h2><p>Gasto com Moradores</p></div>', unsafe_allow_html=True)
                                 else:
-                                    c1, c2, c3 = st.columns(3)
-                                    c1.markdown(f'<div class="metric-card" style="border-left: 5px solid #6c757d;"><h4>🌐 UNIVERSO TOTAL</h4><h2 style="color:#6c757d; margin:0;">{vol_total:,}</h2><p>Todos os registros mapeados</p></div>', unsafe_allow_html=True)
-                                    c2.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 {txt_oco}</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2><p>{txt_oco_desc}</p></div>', unsafe_allow_html=True)
-                                    c3.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>🏠 {txt_res}</h4><h2 style="color:#28a745; margin:0;">{vol_res:,}</h2><p>{txt_res_desc}</p></div>', unsafe_allow_html=True)
+                                    c1, c2 = st.columns(2)
+                                    c1.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 {txt_oco}</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2><p>{txt_oco_desc}</p></div>', unsafe_allow_html=True)
+                                    c2.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>🏠 {txt_res}</h4><h2 style="color:#28a745; margin:0;">{vol_res:,}</h2><p>{txt_res_desc}</p></div>', unsafe_allow_html=True)
                                 
                                 st.markdown("---")
                                 st.markdown("### 🗺️ Raio-X do Fluxo Geográfico (Migração de Pacientes/Eventos)")
@@ -838,9 +834,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 st.warning("⚠️ **Aviso:** Os arquivos de faturamento do Governo (neste grupo/ano) não informaram a residência dos pacientes, apenas o local do Hospital/Ocorrência. O mapa de migração foi desabilitado para esta extração.")
                                 mask_oco = df_tratado[col_oco].astype(str).str.startswith(id_datasus_alvo[:6])
                                 vol_oco = mask_oco.sum()
-                                c1, c2 = st.columns(2)
-                                c1.markdown(f'<div class="metric-card" style="border-left: 5px solid #6c757d;"><h4>🌐 UNIVERSO TOTAL</h4><h2 style="color:#6c757d; margin:0;">{vol_total:,}</h2></div>', unsafe_allow_html=True)
-                                c2.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 {txt_oco}</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2></div>', unsafe_allow_html=True)
+                                st.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 {txt_oco}</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2></div>', unsafe_allow_html=True)
                             else:
                                 st.markdown(f'<div class="metric-card"><h2>{len(df_bruto)} Registros Processados</h2><p>{sistema_titulo} - {nome_local} ({periodo_label})</p></div>', unsafe_allow_html=True)
 
@@ -855,9 +849,12 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 else: card_text = f"<h2>{len(df_bruto)} {m_cnes['principal_label'].lower()} processados</h2>"
                             st.markdown(f'<div class="metric-card">{card_text}<p>{sistema_titulo} - {nome_local} ({periodo_label})</p></div>', unsafe_allow_html=True)
                         
-                        tab1, tab2, tab3 = st.tabs(["✅ Planilha Tratada", "⚙️ Planilha Bruta", "📈 Painel de Hospitais e Clínicas" if "CNES" in sistema else "📈 Painel de Análises Clínicas e Perfil"])
+                        if nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Amostra limitada de microdados":
+                            st.warning("Consulta estadual em base pesada. Para preservar o funcionamento do app, a visualização foi limitada a uma amostra de 50.000 registros. Para microdados completos, utilize filtro municipal ou exportação específica.")
                         
-                        # 🌟 VISUALIZAÇÃO COM SCROLL INFINITO (SEM LIMITADOR NA TELA)
+                        tab1, tab2, tab3 = st.tabs(["✅ Planilha Tratada", "⚙️ Planilha Bruta", "📈 Painel de Hospitais e Clínicas" if "CNES" in sistema else "📈 Painel Analítico"])
+                        
+                        # 🌟 VISUALIZAÇÃO COM SCROLL INFINITO (SEM LIMITADOR DE LINHAS)
                         with tab1:
                             st.dataframe(df_tratado, width="stretch")
                             st.download_button("📥 Baixar Tabela TRATADA Completa (CSV)", df_tratado.to_csv(index=False, sep=';', decimal=','), f"tratado_{sistema_titulo}_{nome_local}.csv", "text/csv")
@@ -871,14 +868,14 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             else:
                                 df_dash = df_tratado.copy()
                                 
-                                # 🌟 RESTAURAÇÃO DOS BOTÕES DE LENTE EPIDEMIOLÓGICA (PARA TODAS AS BASES)
+                                # 🌟 DASHBOARD AUTOMÁTICO BASEADO NA NATUREZA DO SISTEMA
                                 if nivel_terr == "Município" and "CNES" not in sistema and col_res and col_oco:
                                     st.write("---")
-                                    visao_dash = st.radio("📊 Filtrar análises gráficas abaixo para focar em:", 
-                                                          ["🌐 Universo Total (Ocorrência + Residência)", "🏥 Ocorrência na Cidade", "🏠 Apenas Moradores Locais"], horizontal=True)
-                                    if "Ocorrência" in visao_dash:
+                                    if "SIH" in sistema:
+                                        st.info("🏥 **Lente Hospitalar/Ocorrência:** Os perfis clínicos e de custos abaixo representam a realidade dos ATENDIDOS NA CIDADE.")
                                         df_dash = df_tratado[df_tratado[col_oco].astype(str).str.startswith(id_datasus_alvo[:6])]
-                                    elif "Moradores" in visao_dash:
+                                    else:
+                                        st.info("🏠 **Lente Epidemiológica/Residência:** O painel abaixo mapeia o perfil exclusivo dos MORADORES DESTA CIDADE (A base de saúde pública da sua população).")
                                         df_dash = df_tratado[df_tratado[col_res].astype(str).str.startswith(id_datasus_alvo[:6])]
                                 
                                 if "CNES" not in sistema:
@@ -901,7 +898,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                         with c_b: st.bar_chart(df_dash["Diagnóstico Principal (CID-10)"].value_counts().head(10))
                                         
                                 elif "SINASC" in sistema:
-                                    st.write("### Perfil da Mãe e Nascimento")
                                     c1, c2, c3 = st.columns(3)
                                     with c1:
                                         if "Faixa Etária da Mãe" in df_dash.columns: st.bar_chart(df_dash["Faixa Etária da Mãe"].value_counts().sort_index())
@@ -927,7 +923,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                             if "Atende SUS?" in df_dash.columns: st.bar_chart(df_dash["Atende SUS?"].value_counts())
                                         with c2:
                                             st.write("**Top 15 Maiores Estabelecimentos da Cidade**")
-                                            st.caption("Consulte detalhes do código CNES em: https://cnes.datasus.gov.br/pages/estabelecimentos/consulta.jsp")
+                                            st.caption("🔍 Você pode consultar os detalhes de cada hospital pelo código CNES no site oficial: https://cnes.datasus.gov.br/pages/estabelecimentos/consulta.jsp")
                                             if "Nome Unidade" in df_dash.columns:
                                                 st.dataframe(df_dash[["CNES", "Nome Unidade", "Atende SUS?"]].head(15), use_container_width=True)
                                             else:
@@ -945,7 +941,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                                 st.bar_chart(df_plot)
                                         with c2:
                                             st.write("**Leitos de UTI vs Comuns**")
-                                            st.info("Acesse a aba 'Planilha Tratada' para visualizar a quebra do faturamento e capacidade técnica por tipo de leito.")
+                                            st.info("Acesse a aba 'Planilha Tratada' para visualizar a quantidade física exata e detalhada por especialidade médica.")
                                     else:
                                         st.write("📈 *O Painel Gráfico prioriza as bases ST (Estabelecimentos) e LT (Leitos).*")
 
