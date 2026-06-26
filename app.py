@@ -1,4 +1,4 @@
-# VERSAO_FINAL_SIH_DASHBOARD_DINAMICO_V23
+# VERSAO_FINAL_SIH_RAIO_X_MIGRACAO_V25
 import streamlit as st
 import pandas as pd
 import requests
@@ -25,7 +25,7 @@ st.markdown("""
     <style>
     .header-sidra { background-color: #003366; padding: 20px; color: white; border-radius: 5px; text-align: center; margin-bottom: 20px; }
     .stButton>button { background-color: #003366; color: white; width: 100%; }
-    .metric-card { background-color: #f0f2f6; padding: 20px; border-radius: 10px; border-left: 5px solid #003366; text-align: center; margin-bottom: 15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);}
+    .metric-card { background-color: #f0f2f6; padding: 15px; border-radius: 10px; border-left: 5px solid #003366; text-align: center; margin-bottom: 15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.05);}
     .footer-text { text-align: center; color: #666; font-size: 14px; margin-top: 50px; padding-top: 20px; border-top: 1px solid #ddd; }
     </style>
 """, unsafe_allow_html=True)
@@ -54,7 +54,6 @@ def listar_anos_disponiveis(sistema="GERAL"):
     ano_inicial, ano_final = limites.get(sistema, (1995, ano_atual - 1))
     return list(range(ano_final, ano_inicial - 1, -1))
 
-# 🌟 NOVO: DICIONÁRIO DUPLO DE COLUNAS TERRITORIAIS
 def obter_colunas_territoriais(sistema, grupo=None):
     if "SIH" in sistema:
         if grupo == "SP": return {"res": ["SP_MUNRES", "MUNIC_RES"], "oco": ["SP_MUNMOV", "SP_MUNIC", "MUNIC_MOV"]}
@@ -133,7 +132,6 @@ def buscar_municipios_por_uf(uf_sigla):
     except:
         return {"Belo Horizonte": {"id7": "3106200", "id6": "310620", "nome": "Belo Horizonte", "uf": "MG"}}
 
-# 🌟 LIMPEZA DE CACHE DO PYSUS
 def limpar_cache_pysus_sih():
     caminhos_cache = [
         os.path.expanduser("~/pysus/downloads/ducklake/sih"),
@@ -212,7 +210,6 @@ def decodificar_sigtap(codigo, dict_sigtap):
     if dict_sigtap and cod in dict_sigtap: return f"{cod} - {dict_sigtap[cod]}"
     return cod
 
-# 🌟 NOVO: O PANDAS FAZ A UNIÃO MATEMÁTICA (RESIDENCIA OR OCORRENCIA)
 def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo_dict, dt_alvos, grupo=None):
     try:
         df_t = df_t.copy()
@@ -369,7 +366,6 @@ def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     if not selecionados: return []
     return selecionados
 
-# 🌟 NOVO: O DUCKDB FAZ A UNIÃO MATEMÁTICA VIA 'OR'
 def processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_alvo, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado="Amostra limitada de microdados", prefixo_esperado=None):
     arquivos_lidos = 0
     try:
@@ -427,7 +423,6 @@ def processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_alvo, sistema, nivel_
                             frames.append(df)
                             
                     elif nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Resumo agregado":
-                        # Resumo Agregado foca na Ocorrência por padrão
                         col_mun_agreg = col_filtro_oco or col_filtro_res
                         if not col_mun_agreg:
                             col_mun_agreg = next((c for c in cols_parquet if c.upper() in ["MUNIC_RES", "SP_MUNRES", "ID_MN_RESI", "ID_MUNICIP", "CODUFMUN"]), None)
@@ -494,10 +489,7 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
     if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     partes_final = [] 
     meses_para_baixar = [mes_num] if mes_num else [None]
-    
-    # Busca O Universo Completo (Ocorrencia + Residencia)
     cols_alvo_dict = obter_colunas_territoriais(sistema, sih_grupo)
-    
     dt_alvos = ["DTOBITO", "DTNASC", "DT_NOTIFIC", "DT_INTER"]
     falhas = []
     sucessos_download = 0
@@ -672,7 +664,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
     ufs_selecionadas = []; id_ibge_alvo = "1"; id_datasus_alvo = ""
     ufs_ordenadas = sorted(UFS)
 
-    # 🌟 CARREGA O MAPA DE MUNICÍPIOS
+    # 🌟 CARREGA O MAPA DE MUNICÍPIOS PARA USO GLOBAL
     uf_sel = st.sidebar.selectbox("Selecione o Estado:", ufs_ordenadas, index=ufs_ordenadas.index("MG"))
     muns_estado = buscar_municipios_por_uf(uf_sel)
     mapa_ibge = {dados['id6']: nome for nome, dados in muns_estado.items()}
@@ -750,7 +742,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                     if not df_bruto.empty and "Erro" not in df_bruto.columns:
                         if nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Resumo agregado":
                             df_tratado = df_bruto.copy()
-                            df_tratado.columns = ["CÓDIGO_MUNICÍPIO", "TOTAL_DE_REGISTROS"]
+                            df_tratado.columns = ["CÓDIGO_MUNICÍPIO_RESIDENTE", "TOTAL_DE_REGISTROS"]
                             sistema_titulo = f"Resumo Agregado — {sistema}"
                         else:
                             df_tratado = tratar_e_traduzir_df(df_bruto, sistema)
@@ -758,20 +750,67 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                         
                         periodo_label = f"{mes_sel:02d}/{ano_sel}" if mes_sel else f"{ano_sel}"
                         
-                        # 🌟 LÓGICA DA VISÃO DUPLA NA INTERFACE (Ocorrência x Residência)
+                        # 🌟 RENDERING DO RAIO-X DE MIGRAÇÃO COM CLASSIFICAÇÃO AUTOMÁTICA
                         if nivel_terr == "Município" and "CNES" not in sistema:
-                            col_res = next((c for c in df_tratado.columns if c in ["MUNIC_RES", "SP_MUNRES", "CODMUNRES", "ID_MN_RESI"]), None)
-                            col_oco = next((c for c in df_tratado.columns if c in ["MUNIC_MOV", "SP_MUNMOV", "CODMUNOCOR", "CODMUNNASC", "ID_MUNICIP", "SP_MUNIC", "GESTOR_COD"]), None)
+                            cols_dict = obter_colunas_territoriais(sistema, sih_grupo_sel)
+                            col_res = next((c for c in df_tratado.columns if c in cols_dict.get("res", [])), None)
+                            col_oco = next((c for c in df_tratado.columns if c in cols_dict.get("oco", [])), None)
                             
                             if col_res and col_oco:
-                                vol_res = df_tratado[col_res].astype(str).str.startswith(id_datasus_alvo[:6]).sum()
-                                vol_oco = df_tratado[col_oco].astype(str).str.startswith(id_datasus_alvo[:6]).sum()
+                                mask_res = df_tratado[col_res].astype(str).str.startswith(id_datasus_alvo[:6])
+                                mask_oco = df_tratado[col_oco].astype(str).str.startswith(id_datasus_alvo[:6])
                                 
-                                c1, c2 = st.columns(2)
-                                with c1:
-                                    st.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h3>🏠 RESIDÊNCIA</h3><h1 style="color:#28a745; margin:0;">{vol_res:,}</h1><p>Moradores de {nome_local} atendidos</p></div>', unsafe_allow_html=True)
-                                with c2:
-                                    st.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h3>🏥 OCORRÊNCIA</h3><h1 style="color:#007bff; margin:0;">{vol_oco:,}</h1><p>Atendimentos nos hospitais locais</p></div>', unsafe_allow_html=True)
+                                vol_total = len(df_tratado)
+                                vol_oco = mask_oco.sum()
+                                vol_res = mask_res.sum()
+                                vol_ambos = (mask_oco & mask_res).sum()
+                                vol_oco_fora = (mask_oco & ~mask_res).sum()
+                                vol_res_fora = (mask_res & ~mask_oco).sum()
+                                
+                                # Carimba as linhas da tabela (CSV) para o usuário saber quem é quem
+                                def classificar_relacao(row):
+                                    r = str(row[col_res]).startswith(id_datasus_alvo[:6])
+                                    o = str(row[col_oco]).startswith(id_datasus_alvo[:6])
+                                    if r and o: return f"Morador atendido em {nome_local}"
+                                    if o and not r: return f"Paciente de fora atendido em {nome_local} (Importado)"
+                                    if r and not o: return f"Morador de {nome_local} atendido em outra cidade (Exportado)"
+                                    return "Outros"
+                                df_tratado["Classificação_Migração"] = df_tratado.apply(classificar_relacao, axis=1)
+
+                                st.markdown(f"### 📊 Visão Geral: {sistema_titulo} - {nome_local} ({periodo_label})")
+                                c1, c2, c3 = st.columns(3)
+                                c1.markdown(f'<div class="metric-card" style="border-left: 5px solid #6c757d;"><h4>🌐 UNIVERSO TOTAL</h4><h2 style="color:#6c757d; margin:0;">{vol_total:,}</h2><p>Todos os registros vinculados à cidade</p></div>', unsafe_allow_html=True)
+                                c2.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 ATENDIDOS NA CIDADE</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2><p>Ocuparam a rede local (Ocorrência)</p></div>', unsafe_allow_html=True)
+                                c3.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>🏠 MORADORES AFETADOS</h4><h2 style="color:#28a745; margin:0;">{vol_res:,}</h2><p>Cidadãos que precisaram (Residência)</p></div>', unsafe_allow_html=True)
+                                
+                                st.markdown("---")
+                                st.markdown("### 🗺️ Raio-X do Fluxo de Pacientes (Migração)")
+                                
+                                col_mig1, col_mig2 = st.columns(2)
+                                
+                                with col_mig1:
+                                    st.markdown(f"**🏥 Dos {vol_oco} pacientes atendidos em {nome_local}:**")
+                                    st.write(f"- 🏠 **{vol_ambos}** são moradores da própria cidade.")
+                                    st.write(f"- 🚑 **{vol_oco_fora}** vieram de fora. **De onde eles vieram?**")
+                                    
+                                    if vol_oco_fora > 0:
+                                        df_in = df_tratado[mask_oco & ~mask_res].copy()
+                                        df_in['Origem'] = df_in[col_res].astype(str).str[:6].map(mapa_ibge).fillna("Outro Estado / Desconhecido")
+                                        st.bar_chart(df_in['Origem'].value_counts().head(10), color="#007bff")
+                                    else:
+                                        st.info("Nenhum paciente de fora foi atendido na cidade neste período.")
+                                        
+                                with col_mig2:
+                                    st.markdown(f"**🏠 Dos {vol_res} moradores de {nome_local} que adoeceram:**")
+                                    st.write(f"- 🏥 **{vol_ambos}** foram tratados na própria cidade.")
+                                    st.write(f"- 🚑 **{vol_res_fora}** viajaram para fora. **Para onde eles foram?**")
+                                    
+                                    if vol_res_fora > 0:
+                                        df_out = df_tratado[mask_res & ~mask_oco].copy()
+                                        df_out['Destino'] = df_out[col_oco].astype(str).str[:6].map(mapa_ibge).fillna("Outro Estado / Desconhecido")
+                                        st.bar_chart(df_out['Destino'].value_counts().head(10), color="#28a745")
+                                    else:
+                                        st.info("Nenhum morador precisou sair da cidade para ser atendido.")
                             else:
                                 st.markdown(f'<div class="metric-card"><h2>{len(df_bruto)} Registros Processados</h2><p>{sistema_titulo} - {nome_local} ({periodo_label})</p></div>', unsafe_allow_html=True)
                         else:
@@ -806,10 +845,10 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 
                                 # 🌟 BOTÃO DE ALTERNÂNCIA DINÂMICA DE GRÁFICOS NO DASHBOARD
                                 if nivel_terr == "Município" and "CNES" not in sistema and col_res and col_oco:
-                                    visao_dash = st.radio("📊 Filtrar análises gráficas para focar em:", ["🏥 Ocorrência (Hospitais locais)", "🏠 Residência (Moradores locais)"], horizontal=True)
-                                    if "Ocorrência" in visao_dash:
+                                    visao_dash = st.radio("📊 Filtrar análises gráficas abaixo para focar em:", ["🌐 Universo Total (Todos os 61 registros)", "🏥 Apenas Atendidos na Cidade (Os 15)", "🏠 Apenas Moradores Locais (Os 46)"], horizontal=True)
+                                    if "Atendidos" in visao_dash:
                                         df_dash = df_tratado[df_tratado[col_oco].astype(str).str.startswith(id_datasus_alvo[:6])]
-                                    else:
+                                    elif "Moradores" in visao_dash:
                                         df_dash = df_tratado[df_tratado[col_res].astype(str).str.startswith(id_datasus_alvo[:6])]
                                 
                                 st.subheader(f"Painel Analítico: {sistema_titulo}")
@@ -880,36 +919,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     if col_sexo: st.bar_chart(df_dash[col_sexo].value_counts())
                                     col_raca = next((c for c in df_dash.columns if "Raça" in c), None)
                                     if col_raca: st.bar_chart(df_dash[col_raca].value_counts())
-
-                                # 🌟 MÓDULO DE FLUXO DE PACIENTES / MIGRAÇÃO (RODA NO UNIVERSO TOTAL)
-                                if nivel_terr == "Município" and "CNES" not in sistema and col_res and col_oco:
-                                    st.write("---")
-                                    st.subheader("🗺️ Fluxo de Pacientes (Migração em Saúde)")
-                                    
-                                    c_mig1, c_mig2 = st.columns(2)
-                                    
-                                    with c_mig1:
-                                        st.write(f"**De onde vieram os pacientes?**")
-                                        st.caption(f"Foram atendidos em **{nome_local}**, mas moram em:")
-                                        df_oco_local = df_tratado[df_tratado[col_oco].astype(str).str.startswith(id_datasus_alvo[:6])]
-                                        df_fluxo_in = df_oco_local[col_res].value_counts().reset_index()
-                                        df_fluxo_in.columns = ['IBGE', 'Pacientes']
-                                        df_fluxo_in['Município'] = df_fluxo_in['IBGE'].astype(str).str[:6].map(mapa_ibge).fillna("Outro Estado / Ignorado")
-                                        # Remove a própria cidade para mostrar só os "importados"
-                                        df_fluxo_in = df_fluxo_in[df_fluxo_in['Município'] != nome_local]
-                                        df_fluxo_in = df_fluxo_in.groupby('Município')['Pacientes'].sum().sort_values(ascending=False).head(10)
-                                        st.bar_chart(df_fluxo_in, color="#007bff")
-                                        
-                                    with c_mig2:
-                                        st.write(f"**Para onde os moradores viajaram?**")
-                                        st.caption(f"Moram em **{nome_local}**, mas foram atendidos em:")
-                                        df_res_local = df_tratado[df_tratado[col_res].astype(str).str.startswith(id_datasus_alvo[:6])]
-                                        df_fluxo_out = df_res_local[col_oco].value_counts().reset_index()
-                                        df_fluxo_out.columns = ['IBGE', 'Pacientes']
-                                        df_fluxo_out['Município'] = df_fluxo_out['IBGE'].astype(str).str[:6].map(mapa_ibge).fillna("Outro Estado / Ignorado")
-                                        df_fluxo_out = df_fluxo_out[df_fluxo_out['Município'] != nome_local]
-                                        df_fluxo_out = df_fluxo_out.groupby('Município')['Pacientes'].sum().sort_values(ascending=False).head(10)
-                                        st.bar_chart(df_fluxo_out, color="#28a745")
                     else:
                         msg = df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados disponíveis."
                         if "território, período ou agravo" in msg:
