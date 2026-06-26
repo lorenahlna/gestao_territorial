@@ -1,4 +1,4 @@
-# VERSAO_FINAL_SIH_RAIO_X_MIGRACAO_V25
+# VERSAO_FINAL_PRODUCAO_SUPER_DASHBOARD_V26
 import streamlit as st
 import pandas as pd
 import requests
@@ -56,11 +56,11 @@ def listar_anos_disponiveis(sistema="GERAL"):
 
 def obter_colunas_territoriais(sistema, grupo=None):
     if "SIH" in sistema:
-        if grupo == "SP": return {"res": ["SP_MUNRES", "MUNIC_RES"], "oco": ["SP_MUNMOV", "SP_MUNIC", "MUNIC_MOV"]}
+        if grupo == "SP": return {"res": ["SP_MUNRES"], "oco": ["SP_MUNMOV", "SP_MUNIC"]}
         return {"res": ["MUNIC_RES"], "oco": ["MUNIC_MOV", "GESTOR_COD"]}
-    if "SIM" in sistema: return {"res": ["CODMUNRES"], "oco": ["CODMUNOCOR", "CODMUNCART"]}
-    if "SINASC" in sistema: return {"res": ["CODMUNRES"], "oco": ["CODMUNNASC", "COMUNESTAB"]}
-    if "SINAN" in sistema: return {"res": ["ID_MN_RESI"], "oco": ["ID_MUNICIP", "ID_UNIDADE"]}
+    if "SIM" in sistema: return {"res": ["CODMUNRES"], "oco": ["CODMUNOCOR"]}
+    if "SINASC" in sistema: return {"res": ["CODMUNRES"], "oco": ["CODMUNNASC", "CODMUNESTAB"]}
+    if "SINAN" in sistema: return {"res": ["ID_MN_RESI"], "oco": ["ID_MUNICIP"]}
     if "CNES" in sistema: return {"res": ["CODUFMUN"], "oco": ["CODUFMUN"]}
     return {"res": [], "oco": []}
 
@@ -78,7 +78,6 @@ def carregar_dicionarios_github():
         res = requests.get(URL_RAW_GITHUB, timeout=10).json()
         return res
     except Exception as e:
-        st.warning(f"⚠️ Aviso: Usando dicionários de contingência.")
         return {
             "CBO_ESPECIFICOS": {"2251": "Médicos clínicos", "2235": "Enfermeiros"},
             "CBO_SUBGRUPOS": {"01": "Forças Armadas", "11": "Dirigentes", "22": "Profissionais de Saúde"},
@@ -95,9 +94,7 @@ def carregar_tabelas_complementares():
         try:
             df_cid = pd.read_csv("tabela_cid10_codigo_descricao.csv", sep=";", dtype=str, encoding='utf-8', on_bad_lines='skip')
             if {"codigo_datasus", "descricao"}.issubset(df_cid.columns):
-                df_cid["codigo_datasus"] = df_cid["codigo_datasus"].str.strip().str.upper()
-                df_cid["descricao"] = df_cid["descricao"].str.strip()
-                tabelas["CID10"] = dict(zip(df_cid["codigo_datasus"], df_cid["descricao"]))
+                tabelas["CID10"] = dict(zip(df_cid["codigo_datasus"].str.strip().str.upper(), df_cid["descricao"].str.strip()))
             else:
                 tabelas["CID10"] = dict(zip(df_cid.iloc[:, 0].str.strip().str.upper(), df_cid.iloc[:, 1].str.strip()))
         except: pass
@@ -144,47 +141,29 @@ def limpar_cache_pysus_sih():
             try: shutil.rmtree(caminho)
             except: pass
 
-# --- TRATADORES DE DADOS ---
+# --- TRATADORES DE DADOS AVANÇADOS ---
 def normalizar_codigo(valor):
     if pd.isna(valor): return ""
     return str(valor).strip().replace(".0", "")
 
-def extrair_mes_datasus(serie):
-    s = (serie.astype(str)
-         .str.replace(r"\.0$", "", regex=True)
-         .str.replace("-", "", regex=False)
-         .str.replace("/", "", regex=False)
-         .str.strip())
-    mes_aaaammdd = pd.to_datetime(s, format="%Y%m%d", errors="coerce").dt.month
-    mes_ddmmaaaa = pd.to_datetime(s, format="%d%m%Y", errors="coerce").dt.month
-    mes = mes_aaaammdd.fillna(mes_ddmmaaaa)
-    return mes.astype("Int64")
-
-def decodificar_idade_datasus(valor):
-    v_str = normalizar_codigo(valor)
-    if not v_str: return "Não informado"
+def decodificar_idade_datasus_anos(v):
     try:
-        if len(v_str) in [1, 2]: return f"{v_str} Ano(s)"
-        if len(v_str) >= 3:
-            u, q = v_str[0], int(v_str[1:])
-            if u == '1': return f"{q} Minuto(s)"
-            elif u == '2': return f"{q} Hora(s)"
-            elif u == '3': return f"{q} Mês(es)"
-            elif u == '4': return f"{q} Ano(s)"
-            elif u == '5': return f"{100 + q} Ano(s)"
-            else: return f"{q} (Idade ñ ident.)"
-    except: return str(valor)
+        v = str(v).replace(".0", "").strip()
+        if not v or not v.isdigit(): return -1
+        prefixo, valor = v[0], int(v[1:])
+        if prefixo == '4': return valor
+        if prefixo == '5': return 100 + valor
+        if prefixo in ['1', '2', '3']: return 0
+        return -1
+    except: return -1
 
-def agrupar_idade_mae(idade_str):
-    if "Ano(s)" not in str(idade_str): return "Ignorado"
-    try:
-        idade = int(idade_str.replace(" Ano(s)", ""))
-        if idade < 15: return "< 15 anos"
-        elif 15 <= idade <= 19: return "15 a 19 anos"
-        elif 20 <= idade <= 29: return "20 a 29 anos"
-        elif 30 <= idade <= 39: return "30 a 39 anos"
-        else: return "40 anos ou mais"
-    except: return "Ignorado"
+def agrupar_faixa_etaria(idade):
+    if idade < 0: return "Ignorado"
+    if idade < 15: return "0 a 14 anos"
+    if idade < 20: return "15 a 19 anos"
+    if idade < 40: return "20 a 39 anos"
+    if idade < 60: return "40 a 59 anos"
+    return "60 anos ou mais"
 
 def decodificar_cbo(codigo):
     cod_str = normalizar_codigo(codigo).zfill(6)
@@ -210,6 +189,7 @@ def decodificar_sigtap(codigo, dict_sigtap):
     if dict_sigtap and cod in dict_sigtap: return f"{cod} - {dict_sigtap[cod]}"
     return cod
 
+# 🌟 DUCKDB APLICANDO UNIÃO MATEMÁTICA E FILTROS DE SINAN/SIM
 def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo_dict, dt_alvos, grupo=None):
     try:
         df_t = df_t.copy()
@@ -248,7 +228,11 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
         
         if sistema not in ["Internações (SIH)", "Cadastro Nacional de Estabelecimentos (CNES)"]:
             if mes_num is not None and dt_col_real:
-                meses_extraidos = extrair_mes_datasus(df_t[dt_col_real])
+                # Trata a data para extrair o mes em SIM/SINASC/SINAN
+                s = (df_t[dt_col_real].astype(str).str.replace(r"\.0$", "", regex=True).str.replace("-", "", regex=False).str.strip())
+                mes_aaaammdd = pd.to_datetime(s, format="%Y%m%d", errors="coerce").dt.month
+                mes_ddmmaaaa = pd.to_datetime(s, format="%d%m%Y", errors="coerce").dt.month
+                meses_extraidos = mes_aaaammdd.fillna(mes_ddmmaaaa)
                 df_t = df_t[meses_extraidos == mes_num].copy()
         
         if "SINAN" in sistema and not df_t.empty and len(df_t) > 50000:
@@ -455,11 +439,7 @@ def processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_alvo, sistema, nivel_
 def gerar_metricas_cnes(df, grupo):
     df = df.copy()
     df.columns = [str(c).upper().strip() for c in df.columns]
-    metricas = {
-        "grupo": grupo,
-        "registros": len(df),
-        "estabelecimentos_unicos": df["CNES"].nunique() if "CNES" in df.columns else None
-    }
+    metricas = {"grupo": grupo, "registros": len(df), "estabelecimentos_unicos": df["CNES"].nunique() if "CNES" in df.columns else None}
     if grupo == "ST":
         metricas["principal_label"] = "Estabelecimentos unicos"
         metricas["principal_value"] = metricas["estabelecimentos_unicos"] if metricas["estabelecimentos_unicos"] else len(df)
@@ -467,8 +447,7 @@ def gerar_metricas_cnes(df, grupo):
         metricas["principal_label"] = "Vinculos profissionais"
         metricas["principal_value"] = len(df)
     elif grupo in ["SR", "HB", "IN", "EP", "DC"]:
-        labels = {"SR": "Servicos especializados", "HB": "Habilitacoes", "IN": "Incentivos", "EP": "Equipes cadastradas", "DC": "Registros complementares"}
-        metricas["principal_label"] = labels.get(grupo, "Registros complementares")
+        metricas["principal_label"] = "Registros"
         metricas["principal_value"] = len(df)
     elif grupo == "EQ":
         for col in ["QT_EXIST", "QT_USO", "QT_SUS", "QT_NSUS"]:
@@ -598,6 +577,7 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
             return pd.DataFrame({"Erro": ["Falha de conexão ou arquivo inexistente no DATASUS para os filtros selecionados."] })
     return pd.concat(partes_final, ignore_index=True)
 
+# 🌟 TRATAMENTO DE VARIAVEIS (CBO, CID, IDADE, BAIRRO)
 def tratar_e_traduzir_df(df, sistema):
     df_tratado = df.copy()
     df_tratado.columns = [str(c).upper().strip() for c in df_tratado.columns]
@@ -616,13 +596,33 @@ def tratar_e_traduzir_df(df, sistema):
     })
     dic_dinamico["SINASC"] = dic_sinasc
 
-    if "IDADE" in df_tratado.columns: df_tratado["IDADE"] = df_tratado["IDADE"].apply(decodificar_idade_datasus)
+    # 🌟 IDADE PADRONIZADA (SIM, SINASC, SIH, SINAN)
+    if "NU_IDADE_N" in df_tratado.columns: 
+        df_tratado["Idade (Anos)"] = df_tratado["NU_IDADE_N"].apply(decodificar_idade_datasus_anos)
+        df_tratado["Faixa Etária"] = df_tratado["Idade (Anos)"].apply(agrupar_faixa_etaria)
+    elif "IDADE" in df_tratado.columns:
+        df_tratado["Idade (Anos)"] = df_tratado["IDADE"].apply(decodificar_idade_datasus_anos)
+        df_tratado["Faixa Etária"] = df_tratado["Idade (Anos)"].apply(agrupar_faixa_etaria)
+        
     if "IDADEMAE" in df_tratado.columns: 
-        df_tratado["IDADEMAE"] = df_tratado["IDADEMAE"].apply(decodificar_idade_datasus)
-        df_tratado["GRUPO_IDADE_MAE"] = df_tratado["IDADEMAE"].apply(agrupar_idade_mae)
-    if "NU_IDADE_N" in df_tratado.columns: df_tratado["NU_IDADE_N"] = df_tratado["NU_IDADE_N"].apply(decodificar_idade_datasus)
+        df_tratado["Idade Mãe (Anos)"] = df_tratado["IDADEMAE"].apply(decodificar_idade_datasus_anos)
+        df_tratado["Faixa Etária da Mãe"] = df_tratado["Idade Mãe (Anos)"].apply(agrupar_faixa_etaria)
 
-    for c_vbo in ["OCUP", "OCUPMAE", "CODOCUPMAE", "ID_OCUPA_N"]:
+    # 🌟 SINAN: AIDS (TRANSMISSÃO) E DENGUE (BAIRRO)
+    if "TP_SEXUAL" in df_tratado.columns:
+        dic_sexual = {"1": "Com Homens", "2": "Com Mulheres", "3": "Ambos", "4": "Não sexual", "9": "Ignorado"}
+        df_tratado["Transmissão (Sexual)"] = df_tratado["TP_SEXUAL"].astype(str).str.replace('.0','', regex=False).map(dic_sexual).fillna("Ignorado")
+        
+    if "NOBAIINF" in df_tratado.columns: df_tratado["Bairro Provável Infecção"] = df_tratado["NOBAIINF"]
+    elif "NM_BAIRRO" in df_tratado.columns: df_tratado["Bairro Provável Infecção"] = df_tratado["NM_BAIRRO"]
+
+    # 🌟 CNES: NOME DO HOSPITAL E LEITOS SUS/PRIVADO
+    if "FANTASIA" in df_tratado.columns: df_tratado["Nome Unidade"] = df_tratado["FANTASIA"]
+    if "NO_FANTASIA" in df_tratado.columns: df_tratado["Nome Unidade"] = df_tratado["NO_FANTASIA"]
+    if "VINC_SUS" in df_tratado.columns: 
+        df_tratado["Atende SUS?"] = df_tratado["VINC_SUS"].astype(str).str.replace('.0','', regex=False).map({"1": "Sim", "0": "Não"}).fillna("Não Informado")
+
+    for c_vbo in ["OCUP", "OCUPMAE", "CODOCUPMAE", "ID_OCUPA_N", "COD_CBO"]:
         if c_vbo in df_tratado.columns: df_tratado[c_vbo] = df_tratado[c_vbo].apply(decodificar_cbo)
 
     dict_cid = TABELAS_EXTERNAS.get("CID10", {})
@@ -643,7 +643,7 @@ def tratar_e_traduzir_df(df, sistema):
     cabecalhos["SIH"] = cab_sih
     
     cab_sinasc = dict(cabecalhos.get("SINASC", {}))
-    cab_sinasc.update({"GRUPO_IDADE_MAE": "Faixa Etária da Mãe", "ESCMAE": "Escolaridade Mãe (Anos)", "ESCMAE2010": "Escolaridade Mãe (2010)", "CODOCUPMAE": "Ocupação/Profissão Mãe (CBO)", "RACACORMAE": "Raça/Cor da Mãe"})
+    cab_sinasc.update({"ESCMAE": "Escolaridade Mãe (Anos)", "ESCMAE2010": "Escolaridade Mãe (2010)", "CODOCUPMAE": "Ocupação/Profissão Mãe (CBO)", "RACACORMAE": "Raça/Cor da Mãe"})
     cabecalhos["SINASC"] = cab_sinasc
     
     df_tratado = df_tratado.rename(columns=cabecalhos.get(sigla_sistema, {}))
@@ -664,7 +664,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
     ufs_selecionadas = []; id_ibge_alvo = "1"; id_datasus_alvo = ""
     ufs_ordenadas = sorted(UFS)
 
-    # 🌟 CARREGA O MAPA DE MUNICÍPIOS PARA USO GLOBAL
     uf_sel = st.sidebar.selectbox("Selecione o Estado:", ufs_ordenadas, index=ufs_ordenadas.index("MG"))
     muns_estado = buscar_municipios_por_uf(uf_sel)
     mapa_ibge = {dados['id6']: nome for nome, dados in muns_estado.items()}
@@ -742,7 +741,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                     if not df_bruto.empty and "Erro" not in df_bruto.columns:
                         if nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Resumo agregado":
                             df_tratado = df_bruto.copy()
-                            df_tratado.columns = ["CÓDIGO_MUNICÍPIO_RESIDENTE", "TOTAL_DE_REGISTROS"]
+                            df_tratado.columns = ["CÓDIGO_MUNICÍPIO", "TOTAL_DE_REGISTROS"]
                             sistema_titulo = f"Resumo Agregado — {sistema}"
                         else:
                             df_tratado = tratar_e_traduzir_df(df_bruto, sistema)
@@ -750,7 +749,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                         
                         periodo_label = f"{mes_sel:02d}/{ano_sel}" if mes_sel else f"{ano_sel}"
                         
-                        # 🌟 RENDERING DO RAIO-X DE MIGRAÇÃO COM CLASSIFICAÇÃO AUTOMÁTICA
+                        # 🌟 RENDERING DOS CARDS SUPERIORES: MATEMÁTICA E CLASSIFICAÇÃO GERAL
                         if nivel_terr == "Município" and "CNES" not in sistema:
                             cols_dict = obter_colunas_territoriais(sistema, sih_grupo_sel)
                             col_res = next((c for c in df_tratado.columns if c in cols_dict.get("res", [])), None)
@@ -767,32 +766,30 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 vol_oco_fora = (mask_oco & ~mask_res).sum()
                                 vol_res_fora = (mask_res & ~mask_oco).sum()
                                 
-                                # Carimba as linhas da tabela (CSV) para o usuário saber quem é quem
+                                # Carimba as linhas da tabela para download limpo
                                 def classificar_relacao(row):
                                     r = str(row[col_res]).startswith(id_datasus_alvo[:6])
                                     o = str(row[col_oco]).startswith(id_datasus_alvo[:6])
                                     if r and o: return f"Morador atendido em {nome_local}"
                                     if o and not r: return f"Paciente de fora atendido em {nome_local} (Importado)"
-                                    if r and not o: return f"Morador de {nome_local} atendido em outra cidade (Exportado)"
+                                    if r and not o: return f"Morador de {nome_local} atendido fora (Exportado)"
                                     return "Outros"
                                 df_tratado["Classificação_Migração"] = df_tratado.apply(classificar_relacao, axis=1)
 
                                 st.markdown(f"### 📊 Visão Geral: {sistema_titulo} - {nome_local} ({periodo_label})")
                                 c1, c2, c3 = st.columns(3)
                                 c1.markdown(f'<div class="metric-card" style="border-left: 5px solid #6c757d;"><h4>🌐 UNIVERSO TOTAL</h4><h2 style="color:#6c757d; margin:0;">{vol_total:,}</h2><p>Todos os registros vinculados à cidade</p></div>', unsafe_allow_html=True)
-                                c2.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 ATENDIDOS NA CIDADE</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2><p>Ocuparam a rede local (Ocorrência)</p></div>', unsafe_allow_html=True)
-                                c3.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>🏠 MORADORES AFETADOS</h4><h2 style="color:#28a745; margin:0;">{vol_res:,}</h2><p>Cidadãos que precisaram (Residência)</p></div>', unsafe_allow_html=True)
+                                c2.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 ATENDIDOS NA CIDADE</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2><p>Ocorrência / Produção Local</p></div>', unsafe_allow_html=True)
+                                c3.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>🏠 MORADORES AFETADOS</h4><h2 style="color:#28a745; margin:0;">{vol_res:,}</h2><p>Saúde da População Local</p></div>', unsafe_allow_html=True)
                                 
                                 st.markdown("---")
                                 st.markdown("### 🗺️ Raio-X do Fluxo de Pacientes (Migração)")
                                 
                                 col_mig1, col_mig2 = st.columns(2)
-                                
                                 with col_mig1:
-                                    st.markdown(f"**🏥 Dos {vol_oco} pacientes atendidos em {nome_local}:**")
+                                    st.markdown(f"**🏥 Dos {vol_oco} pacientes atendidos na rede de {nome_local}:**")
                                     st.write(f"- 🏠 **{vol_ambos}** são moradores da própria cidade.")
                                     st.write(f"- 🚑 **{vol_oco_fora}** vieram de fora. **De onde eles vieram?**")
-                                    
                                     if vol_oco_fora > 0:
                                         df_in = df_tratado[mask_oco & ~mask_res].copy()
                                         df_in['Origem'] = df_in[col_res].astype(str).str[:6].map(mapa_ibge).fillna("Outro Estado / Desconhecido")
@@ -804,7 +801,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     st.markdown(f"**🏠 Dos {vol_res} moradores de {nome_local} que adoeceram:**")
                                     st.write(f"- 🏥 **{vol_ambos}** foram tratados na própria cidade.")
                                     st.write(f"- 🚑 **{vol_res_fora}** viajaram para fora. **Para onde eles foram?**")
-                                    
                                     if vol_res_fora > 0:
                                         df_out = df_tratado[mask_res & ~mask_oco].copy()
                                         df_out['Destino'] = df_out[col_oco].astype(str).str[:6].map(mapa_ibge).fillna("Outro Estado / Desconhecido")
@@ -829,7 +825,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                         if "SINAN" in sistema and len(df_tratado) >= 50000:
                             st.warning("⚠️ O limite de visualização de 50.000 linhas foi acionado por segurança de RAM. Por favor, baixe o CSV para acessar a base completa.")
                         
-                        tab1, tab2, tab3 = st.tabs(["✅ Planilha Tratada", "⚙️ Planilha Bruta", "📈 Painel de Análises (Dashboards)"])
+                        tab1, tab2, tab3 = st.tabs(["✅ Planilha Tratada", "⚙️ Planilha Bruta", "📈 Painel de Análises Clínicas e Perfil"])
                         with tab1:
                             st.dataframe(df_tratado.head(100), width="stretch")
                             st.download_button("📥 Baixar Tabela TRATADA (CSV)", df_tratado.to_csv(index=False, sep=';', decimal=','), f"tratado_{sistema_titulo}_{nome_local}.csv", "text/csv")
@@ -843,26 +839,29 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             else:
                                 df_dash = df_tratado.copy()
                                 
-                                # 🌟 BOTÃO DE ALTERNÂNCIA DINÂMICA DE GRÁFICOS NO DASHBOARD
+                                # 🌟 DASHBOARD SEM BOLINHAS (LENTE TÉCNICA FIXADA PELO SISTEMA)
                                 if nivel_terr == "Município" and "CNES" not in sistema and col_res and col_oco:
-                                    visao_dash = st.radio("📊 Filtrar análises gráficas abaixo para focar em:", ["🌐 Universo Total (Todos os 61 registros)", "🏥 Apenas Atendidos na Cidade (Os 15)", "🏠 Apenas Moradores Locais (Os 46)"], horizontal=True)
-                                    if "Atendidos" in visao_dash:
+                                    if "SIH" in sistema:
+                                        st.info("🏥 **Foco Financeiro/Hospitalar:** Para o SIH, os custos e perfis clínicos abaixo mostram a realidade dos **ATENDIDOS NA CIDADE (Ocorrência)**, avaliando o dinheiro que entrou e a produção dos hospitais locais.")
                                         df_dash = df_tratado[df_tratado[col_oco].astype(str).str.startswith(id_datasus_alvo[:6])]
-                                    elif "Moradores" in visao_dash:
+                                    else:
+                                        st.info("🏠 **Foco Epidemiológico:** Para Nascimentos, Mortalidade e Agravos, o painel abaixo mapeia o perfil dos **MORADORES DESTA CIDADE (Residência)**, independente de onde o evento tenha ocorrido, para facilitar o planejamento em saúde da sua população.")
                                         df_dash = df_tratado[df_tratado[col_res].astype(str).str.startswith(id_datasus_alvo[:6])]
                                 
-                                st.subheader(f"Painel Analítico: {sistema_titulo}")
+                                st.subheader(f"Perfil Demográfico/Clínico: {sistema_titulo}")
                                 if "SIH" in sistema:
-                                    c1, c2, c3 = st.columns(3)
+                                    c1, c2 = st.columns(2)
                                     for c_val in ["Valor Total AIH (R$)", "Valor UTI (R$)"]:
                                         if c_val in df_dash.columns:
                                             df_dash.loc[:, f"Num_{c_val}"] = pd.to_numeric(df_dash[c_val].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
                                     soma_tot = df_dash["Num_Valor Total AIH (R$)"].sum() if "Num_Valor Total AIH (R$)" in df_dash.columns else 0
                                     soma_uti = df_dash["Num_Valor UTI (R$)"].sum() if "Num_Valor UTI (R$)" in df_dash.columns else 0
-                                    c1.metric("💰 Custo Total Pago (AIH)", f"R$ {soma_tot:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-                                    c2.metric("🏥 Custo em UTI", f"R$ {soma_uti:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                                    c1.metric("💰 Faturamento Total na Visão Selecionada (AIH)", f"R$ {soma_tot:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+                                    c2.metric("🏥 Faturamento em Leitos de UTI", f"R$ {soma_uti:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
                                     
-                                    c_sexo, c_morte = st.columns(2)
+                                    c_faixa, c_sexo, c_morte = st.columns(3)
+                                    with c_faixa:
+                                        if "Faixa Etária" in df_dash.columns: st.bar_chart(df_dash["Faixa Etária"].value_counts().sort_index())
                                     with c_sexo:
                                         col_sexo = next((c for c in df_dash.columns if "Sexo Paciente" in c), None)
                                         if col_sexo: st.bar_chart(df_dash[col_sexo].value_counts())
@@ -876,49 +875,62 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                         with c_b: st.bar_chart(df_dash["Diagnóstico Principal (CID-10)"].value_counts().head(10))
                                         
                                 elif "SINASC" in sistema:
-                                    st.write("### Perfil da Mãe")
-                                    c1, c2 = st.columns(2)
+                                    st.write("### Perfil da Mãe e Nascimento")
+                                    c1, c2, c3 = st.columns(3)
                                     with c1:
                                         if "Faixa Etária da Mãe" in df_dash.columns: st.bar_chart(df_dash["Faixa Etária da Mãe"].value_counts().sort_index())
                                     with c2:
                                         if "Escolaridade Mãe (2010)" in df_dash.columns: st.bar_chart(df_dash["Escolaridade Mãe (2010)"].value_counts())
-                                    if "Ocupação/Profissão Mãe (CBO)" in df_dash.columns: st.bar_chart(df_dash["Ocupação/Profissão Mãe (CBO)"].value_counts().head(10))
-                                    
-                                    st.write("---")
-                                    st.write("### Perfil do Nascido Vivo")
-                                    c3, c4, c5 = st.columns(3)
                                     with c3:
-                                        col_sexo = next((c for c in df_dash.columns if "Sexo Bebê" in c), None)
-                                        if col_sexo: st.bar_chart(df_dash[col_sexo].value_counts())
-                                    with c4:
-                                        col_cor_bebe = next((c for c in df_dash.columns if "Raça/Cor Bebê" in c), None)
-                                        if col_cor_bebe: st.bar_chart(df_dash[col_cor_bebe].value_counts())
-                                    with c5:
                                         col_cor_mae = next((c for c in df_dash.columns if "Raça/Cor da Mãe" in c), None)
                                         if col_cor_mae: st.bar_chart(df_dash[col_cor_mae].value_counts())
+
+                                    c4, c5 = st.columns(2)
+                                    with c4:
+                                        if "Ocupação/Profissão Mãe (CBO)" in df_dash.columns: st.bar_chart(df_dash["Ocupação/Profissão Mãe (CBO)"].value_counts().head(10))
+                                    with c5:
+                                        col_sexo = next((c for c in df_dash.columns if "Sexo Bebê" in c), None)
+                                        if col_sexo: st.bar_chart(df_dash[col_sexo].value_counts())
                                         
                                 elif "CNES" in sistema:
                                     st.write("📈 *O Painel Gráfico prioriza bases clínicas e epidemiológicas.*")
-                                elif "SIM" in sistema:
-                                    c1, c2 = st.columns(2)
-                                    col_sexo = next((c for c in df_dash.columns if "Sexo" in c), None)
-                                    if col_sexo: st.bar_chart(df_dash[col_sexo].value_counts())
-                                    col_raca = next((c for c in df_dash.columns if "Raça" in c), None)
-                                    if col_raca: st.bar_chart(df_dash[col_raca].value_counts())
-                                    
-                                    c3, c4 = st.columns(2)
+                                elif "SINAN" in sistema:
+                                    c1, c2, c3 = st.columns(3)
+                                    with c1:
+                                        if "Faixa Etária" in df_dash.columns: st.bar_chart(df_dash["Faixa Etária"].value_counts().sort_index())
+                                    with c2:
+                                        col_sexo = next((c for c in df_dash.columns if "Sexo" in c), None)
+                                        if col_sexo: st.bar_chart(df_dash[col_sexo].value_counts())
                                     with c3:
-                                        col_circ = next((c for c in df_dash.columns if "Circunstância do Óbito" in c), None)
-                                        if col_circ: st.bar_chart(df_dash[col_circ].value_counts())
-                                    with c4:
+                                        col_raca = next((c for c in df_dash.columns if "Raça" in c), None)
+                                        if col_raca: st.bar_chart(df_dash[col_raca].value_counts())
+                                        
+                                    if "Transmissão (Sexual)" in df_dash.columns:
+                                        st.write("### Modo de Transmissão")
+                                        st.bar_chart(df_dash["Transmissão (Sexual)"].value_counts())
+                                        
+                                    if "Bairro Provável Infecção" in df_dash.columns:
+                                        st.write("### Bairros de Infecção (Top 10)")
+                                        st.bar_chart(df_dash["Bairro Provável Infecção"].value_counts().head(10))
+                                        
+                                elif "SIM" in sistema:
+                                    c1, c2, c3 = st.columns(3)
+                                    with c1:
+                                        if "Faixa Etária" in df_dash.columns: st.bar_chart(df_dash["Faixa Etária"].value_counts().sort_index())
+                                    with c2:
+                                        col_sexo = next((c for c in df_dash.columns if "Sexo" in c), None)
+                                        if col_sexo: st.bar_chart(df_dash[col_sexo].value_counts())
+                                    with c3:
+                                        col_raca = next((c for c in df_dash.columns if "Raça" in c), None)
+                                        if col_raca: st.bar_chart(df_dash[col_raca].value_counts())
+                                    
+                                    c_a, c_b = st.columns(2)
+                                    with c_a:
                                         col_doenca = next((c for c in df_dash.columns if "Causa Básica (CID-10)" in c), None)
                                         if col_doenca: st.bar_chart(df_dash[col_doenca].value_counts().head(10))
-                                else:
-                                    c1, c2 = st.columns(2)
-                                    col_sexo = next((c for c in df_dash.columns if "Sexo" in c), None)
-                                    if col_sexo: st.bar_chart(df_dash[col_sexo].value_counts())
-                                    col_raca = next((c for c in df_dash.columns if "Raça" in c), None)
-                                    if col_raca: st.bar_chart(df_dash[col_raca].value_counts())
+                                    with c_b:
+                                        col_circ = next((c for c in df_dash.columns if "Circunstância do Óbito" in c), None)
+                                        if col_circ: st.bar_chart(df_dash[col_circ].value_counts())
                     else:
                         msg = df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados disponíveis."
                         if "território, período ou agravo" in msg:
