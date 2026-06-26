@@ -1,4 +1,4 @@
-# VERSAO_FINAL_SIH_CALIBRADA_PRODUCAO_V19
+# VERSAO_FINAL_SIH_VISAO_DUPLA_V21
 import streamlit as st
 import pandas as pd
 import requests
@@ -54,20 +54,24 @@ def listar_anos_disponiveis(sistema="GERAL"):
     ano_inicial, ano_final = limites.get(sistema, (1995, ano_atual - 1))
     return list(range(ano_final, ano_inicial - 1, -1))
 
-def obter_colunas_municipio(sistema, grupo=None):
+# 🌟 NOVO: INTELIGÊNCIA DE SELEÇÃO DE COLUNAS (RESIDÊNCIA VS OCORRÊNCIA)
+def obter_colunas_municipio(sistema, grupo=None, tipo_filtro="🏥 Local de Internação/Ocorrência"):
+    is_residencia = "Residência" in tipo_filtro
     if "SIH" in sistema:
-        if grupo == "RD":
-            return ["MUNIC_RES", "MUNIC_MOV", "GESTOR_COD"]
-        elif grupo == "SP":
-            return ["SP_MUNRES", "SP_MUNMOV", "SP_GESTOR", "SP_MUNIC"]
-        elif grupo == "ER":
-            return ["MUNIC_RES", "MUNIC_MOV", "SP_MUNRES", "SP_MUNMOV", "SP_GESTOR", "SP_MUNIC", "CO_ERRO"]
+        if is_residencia:
+            if grupo == "SP": return ["SP_MUNRES", "MUNIC_RES"]
+            return ["MUNIC_RES"]
         else:
-            return ["MUNIC_RES", "MUNIC_MOV", "SP_MUNRES", "SP_MUNMOV", "SP_GESTOR", "SP_MUNIC"]
-    if "SIM" in sistema: return ["CODMUNRES"]
-    if "SINASC" in sistema: return ["CODMUNRES", "CODMUNNASC"]
-    if "SINAN" in sistema: return ["ID_MN_RESI", "ID_MUNICIP"]
-    if "CNES" in sistema: return ["CODUFMUN"]
+            if grupo == "SP": return ["SP_MUNMOV", "SP_MUNIC", "MUNIC_MOV"]
+            return ["MUNIC_MOV", "GESTOR_COD"]
+    if "SIM" in sistema:
+        return ["CODMUNRES"] if is_residencia else ["CODMUNOCOR", "CODMUNCART"]
+    if "SINASC" in sistema:
+        return ["CODMUNRES"] if is_residencia else ["CODMUNNASC", "COMUNESTAB"]
+    if "SINAN" in sistema:
+        return ["ID_MN_RESI"] if is_residencia else ["ID_MUNICIP", "ID_UNIDADE"]
+    if "CNES" in sistema:
+        return ["CODUFMUN"]
     return []
 
 MESES_NOMES = [
@@ -138,7 +142,7 @@ def buscar_municipios_por_uf(uf_sigla):
     except:
         return {"Belo Horizonte": {"id7": "3106200", "id6": "310620", "nome": "Belo Horizonte", "uf": "MG"}}
 
-# 🌟 LIMPEZA DE CACHE DO PYSUS (IMPEDE CRUZAMENTO DE ARQUIVOS)
+# 🌟 LIMPEZA DE CACHE DO PYSUS
 def limpar_cache_pysus_sih():
     caminhos_cache = [
         os.path.expanduser("~/pysus/downloads/ducklake/sih"),
@@ -259,24 +263,66 @@ def leitura_segura_parquet(caminho, limite=50000):
     except Exception as e:
         return pd.DataFrame()
 
-# 🌟 FALLBACK CIRÚRGICO E ESTILIZADO (TENTA APENAS SE INFORMAR O GRUPO)
-def baixar_sih_fallback_api(uf, ano, mes, grupo):
-    if not api_sih: return None
-    res = None
-    tentativas = [
-        {"states": [uf], "years": [int(ano)], "months": [int(mes)], "groups": [grupo]},
-        {"states": uf, "years": ano, "months": mes, "groups": grupo},
-        {"state": uf, "year": int(ano), "month": int(mes), "groups": [grupo]},
-        {"state": uf, "year": int(ano), "month": int(mes), "group": grupo}
-    ]
-    for param in tentativas:
+def baixar_sih_motor_raiz(uf, ano, mes, grupo):
+    try:
+        from pysus.ftp.databases.sih import SIH
+        motor_sih = SIH()
+        motor_sih.load()
+        
+        ano_str = str(ano)[-2:]
+        mes_str = f"{int(mes):02d}" if mes else ""
+        
+        arquivos_esperados = motor_sih.get_files(dis_group=grupo, uf=uf, year=ano_str, month=mes_str)
+        if not arquivos_esperados:
+            return None
+            
+        arquivos_baixados = motor_sih.download(arquivos_esperados)
+        return arquivos_baixados
+    except Exception as e:
+        return None
+
+def baixar_sih_validado(uf, ano, mes, grupo):
+    max_retries = 3
+    for tentativa in range(max_retries):
         try:
-            res = api_sih(**param)
-            if res is not None:
-                return res
-        except Exception:
-            pass
+            from pysus.online_data.SIH import download
+            obj = download(uf, int(ano), int(mes), grupo)
+            if hasattr(obj, "to_dataframe"):
+                return obj.to_dataframe()
+            if hasattr(obj, "to_pandas"):
+                return obj.to_pandas()
+            if isinstance(obj, pd.DataFrame):
+                return obj
+            return obj
+        except Exception as e:
+            if "RemoteProtocolError" in str(e) or "connection" in str(e).lower():
+                limpar_cache_pysus_sih()
+                time.sleep(2)
+                continue
+            break 
     return None
+
+def baixar_sih_fallback_api(uf, ano, mes, grupo):
+    res = None
+    tentativas_assinatura = [
+        {"state": uf, "year": int(ano), "month": int(mes), "groups": [grupo]},
+        {"state": uf, "year": int(ano), "month": int(mes), "group": grupo},
+        {"state": uf, "year": int(ano), "month": int(mes)}
+    ]
+    for param in tentativas_assinatura:
+        max_retries = 3
+        for tentativa in range(max_retries):
+            try:
+                res = api_sih(**param)
+                if res is not None:
+                    return res
+            except Exception as e:
+                if "RemoteProtocolError" in str(e) or "connection" in str(e).lower():
+                    limpar_cache_pysus_sih()
+                    time.sleep(2)
+                    continue
+                break 
+    return res
 
 def normalizar_lista_arquivos_pysus(res):
     if res is None: return []
@@ -309,7 +355,6 @@ def normalizar_lista_arquivos_pysus(res):
     if hasattr(res, "path"): return [str(res.path)]
     return [str(res)]
 
-# 🌟 FILTRO ABSOLUTO DE CACHE SUJO: SÓ PASSA O GRUPO CERTO
 def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     if isinstance(arquivos, pd.DataFrame): return arquivos
     ano2 = str(ano)[-2:]
@@ -379,7 +424,11 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
                         df = duckdb.query(query).df()
                         frames.append(df)
                     elif nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Resumo agregado":
-                        col_mun_res = next((c for c in cols_parquet if c.upper() in ["MUNIC_RES", "SP_MUNRES", "ID_MN_RESI", "ID_MUNICIP", "CODUFMUN"]), None)
+                        # 🌟 Respeita a visão de Residência vs Ocorrência no Estado também!
+                        col_mun_res = next((c for c in cols_parquet if c.upper() in cols_alvo_upper), None)
+                        if not col_mun_res:
+                            col_mun_res = next((c for c in cols_parquet if c.upper() in ["MUNIC_RES", "SP_MUNRES", "ID_MN_RESI", "ID_MUNICIP", "CODUFMUN"]), None)
+                            
                         if col_mun_res:
                             codigo_uf = ESTADOS_IBGE.get(uf, "")
                             where_uf = f"WHERE CAST(\"{col_mun_res}\" AS VARCHAR) LIKE '{codigo_uf}%'" if "SINAN" in sistema and codigo_uf else ""
@@ -401,7 +450,7 @@ def processar_retorno_pysus_duckdb(res, cols_alvo, id_alvo, sistema, nivel_terr,
                     frames.append(leitura_segura_parquet(caminho, limite=50000))
             if frames: return pd.concat(frames, ignore_index=True), arquivos_lidos
     except Exception as e:
-        print(f"[ERRO OPERACIONAL DUCKDB] {repr(e)}")
+        pass
     return pd.DataFrame(), arquivos_lidos
 
 def gerar_metricas_cnes(df, grupo):
@@ -437,11 +486,15 @@ def gerar_metricas_cnes(df, grupo):
         metricas["principal_value"] = len(df)
     return metricas
 
-def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo="", tipo_resultado=""):
+# 🌟 ASSINATURA ATUALIZADA PARA RECEBER A VISÃO DUPLA (tipo_filtro_local)
+def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo="", tipo_resultado="Amostra limitada de microdados", tipo_filtro_local="🏥 Local de Internação/Ocorrência"):
     if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     partes_final = [] 
     meses_para_baixar = [mes_num] if mes_num else [None]
-    cols_alvo = obter_colunas_municipio(sistema, sih_grupo)
+    
+    # Busca a coluna correta baseada no Radio Button selecionado pelo usuário
+    cols_alvo = obter_colunas_municipio(sistema, sih_grupo, tipo_filtro_local)
+    
     dt_alvos = ["DTOBITO", "DTNASC", "DT_NOTIFIC", "DT_INTER"]
     falhas = []
     sucessos_download = 0
@@ -459,9 +512,23 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                 prefixo_token = prefixo_token.upper()
 
                 limpar_cache_pysus_sih()
+
+                res = None
                 
-                # TENTATIVA UNICA E BLINDADA: Garante que só vai baixar se o parâmetro de Grupo existir
-                res = baixar_sih_fallback_api(uf, ano, m, sih_grupo)
+                try:
+                    res = baixar_sih_motor_raiz(uf, ano, m, sih_grupo)
+                except Exception:
+                    pass
+                
+                if not res:
+                    res = baixar_sih_validado(uf, ano, m, sih_grupo)
+                    
+                if not res:
+                    res = baixar_sih_fallback_api(uf, ano, m, sih_grupo)
+
+                if res is None:
+                    falhas.append(f"SIH SEM REGISTROS OU ARQUIVO NÃO PUBLICADO PELO DATASUS | {uf} {ano}/{m}")
+                    continue
 
                 arquivos_norm = normalizar_lista_arquivos_pysus(res)
 
@@ -477,7 +544,7 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                     partes_final.append(df_temp)
                     sucessos_download += 1
                 else:
-                    falhas.append(f"{sistema} SEM REGISTROS OU ARQUIVO AINDA NÃO PUBLICADO | {uf} {ano}/{m}")
+                    falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO TERRITORIAL | {uf} {ano}")
             continue
 
         if "CNES" in sistema:
@@ -538,12 +605,11 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
             
     if not partes_final:
         if any("SEM REGISTROS" in f for f in falhas):
-            return pd.DataFrame({"Erro": ["A base foi baixada corretamente, mas não há registros para o território, período ou agravo selecionados."] })
+            return pd.DataFrame({"Erro": ["A base foi processada, mas não há registros para o território, período ou agravo selecionados. O Datasus pode não ter publicado esses dados ainda."] })
         else:
             return pd.DataFrame({"Erro": ["Falha de conexão ou arquivo inexistente no DATASUS para os filtros selecionados."] })
     return pd.concat(partes_final, ignore_index=True)
 
-# 🌟 TRATAMENTO MEMORY-SAFE PARA OS DICIONÁRIOS
 def tratar_e_traduzir_df(df, sistema):
     df_tratado = df.copy()
     df_tratado.columns = [str(c).upper().strip() for c in df_tratado.columns]
@@ -610,6 +676,9 @@ if aba_ativa == "📋 Guia Principal (Extração)":
     ufs_selecionadas = []; id_ibge_alvo = "1"; id_datasus_alvo = ""
     ufs_ordenadas = sorted(UFS)
 
+    # 🌟 O BOTÃO DE VISÃO DUPLA QUE CRIA A MÁGICA
+    tipo_filtro_local = "🏥 Local de Internação/Ocorrência"
+
     if nivel_terr == "Estado":
         uf_sel = st.sidebar.selectbox("Selecione o Estado:", ufs_ordenadas, index=ufs_ordenadas.index("MG"))
         ufs_selecionadas = [uf_sel]; id_ibge_alvo = ESTADOS_IBGE[uf_sel]; nome_local = uf_sel
@@ -619,6 +688,9 @@ if aba_ativa == "📋 Guia Principal (Extração)":
         mun_nome = st.sidebar.selectbox("Selecione o Município:", sorted(muns_estado.keys()))
         dados_mun = muns_estado[mun_nome]
         ufs_selecionadas = [uf_sel]; id_ibge_alvo = dados_mun['id7']; id_datasus_alvo = dados_mun['id6']; nome_local = mun_nome
+        
+        # O gestor pode escolher de que ponto de vista ele quer ver os dados
+        tipo_filtro_local = st.sidebar.radio("Considerar município como:", ["🏥 Local de Internação/Ocorrência", "🏠 Local de Residência do Paciente"])
 
     if fonte == "🏥 Saúde (DATASUS)":
         sistema = st.sidebar.selectbox("Sistema:", ["Mortalidade (SIM)", "Internações (SIH)", "Nascimentos (SINASC)", "Cadastro Nacional de Estabelecimentos (CNES)", "Notificações (SINAN)"])
@@ -680,7 +752,8 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                 
             with trava_global:
                 with st.spinner(f"Processando via DuckDB para {nome_local}..."):
-                    df_bruto = buscar_datasus_v7(sistema, ufs_selecionadas, ano_sel, mes_sel, agravo_sel, sih_grupo_sel, cnes_grupo_sel, nivel_terr, id_datasus_alvo, tipo_resultado)
+                    # 🌟 ENVIANDO O TIPO DE FILTRO PARA A FUNÇÃO DE BUSCA
+                    df_bruto = buscar_datasus_v7(sistema, ufs_selecionadas, ano_sel, mes_sel, agravo_sel, sih_grupo_sel, cnes_grupo_sel, nivel_terr, id_datasus_alvo, tipo_resultado, tipo_filtro_local)
                     
                     if not df_bruto.empty and "Erro" not in df_bruto.columns:
                         if nivel_terr == "Estado" and sistema in BASES_PESADAS and tipo_resultado == "Resumo agregado":
@@ -807,43 +880,43 @@ elif aba_ativa == "📚 Dicionários e Citações":
     with st.expander("🏥 CNES (Cadastro Nacional de Estabelecimentos de Saúde)"):
         st.markdown("""
         O CNES deve ser tratado estritamente como um cadastro de capacidade instalada de unidades federativas.
-        * **ST - Estabelecimentos (TB_ESTABELECIMENTO):** Apresenta dados cadastrais básicos de unidades[cite: 1704]. A contagem única pelo método `CNES.nunique()` reflete o quantitativo real de estabelecimentos unificados.
-        * **PF - Vínculos Profissionais (TB_CARGA_HORARIA_SUS):** Registra contratos profissional-estabelecimento usando `COD_CBO`[cite: 1743]. Representa o volume de vínculos ativos, não indivíduos físicos isolados.
-        * **SR - Serviços Especializados (RL_ESTAB_SERV_CLASS):** Cadastro técnico de serviços de saúde[cite: 1749]. Não deve ser interpretado como indicador de atendimentos efetuados.
-        * **HB / IN (RL_ESTAB_SIPAC):** Habilitações de alta complexidade e incentivos financeiros regulamentados[cite: 1779, 1803]. Não espelham valores líquidos repassados sem colunas de faturamento explícitas.
-        * **EP - Equipes (TB_EQUIPE):** Cadastro nominal de Equipes de Saúde da Família e correlatas (nomenclatura corrigida do PySUS)[cite: 1758].
-        * **EQ / LT - Equipamentos e Leitos (RL_ESTAB_EQUIPAMENTO / RL_ESTAB_COMPLEMENTAR):** Linhas de tabelas quantitativas[cite: 1740, 1701]. **Atenção:** A função `len(df)` monitora apenas o controle operacional das linhas. O total de itens instalados deve ser calculado pela consolidação da soma da coluna quantitativa `QT_EXIST`.
+        * **ST - Estabelecimentos (TB_ESTABELECIMENTO):** Apresenta dados cadastrais básicos de unidades. A contagem única pelo método `CNES.nunique()` reflete o quantitativo real de estabelecimentos unificados.
+        * **PF - Vínculos Profissionais (TB_CARGA_HORARIA_SUS):** Registra contratos profissional-estabelecimento usando `COD_CBO`. Representa o volume de vínculos ativos, não indivíduos físicos isolados.
+        * **SR - Serviços Especializados (RL_ESTAB_SERV_CLASS):** Cadastro técnico de serviços de saúde. Não deve ser interpretado como indicador de atendimentos efetuados.
+        * **HB / IN (RL_ESTAB_SIPAC):** Habilitações de alta complexidade e incentivos financeiros regulamentados. Não espelham valores líquidos repassados sem colunas de faturamento explícitas.
+        * **EP - Equipes (TB_EQUIPE):** Cadastro nominal de Equipes de Saúde da Família e correlatas (nomenclatura corrigida do PySUS).
+        * **EQ / LT - Equipamentos e Leitos (RL_ESTAB_EQUIPAMENTO / RL_ESTAB_COMPLEMENTAR):** Linhas de tabelas quantitativas. **Atenção:** A função `len(df)` monitora apenas o controle operacional das linhas. O total de itens instalados deve ser calculado pela consolidação da soma da coluna quantitativa `QT_EXIST`.
         """)
 
     with st.expander("🛏️ SIH (Sistema de Informações Hospitalares)"):
         st.markdown("""
         O SIH atua como o sistema de registro de produção e faturamento hospitalar. Os grupos disponíveis possuem naturezas completamente distintas:
-        * **Grupo RD (AIH Reduzida):** É a tabela padrão-ouro para análise epidemiológica de internações no país. Cada linha representa uma internação consolidada e efetiva de paciente que ocupou leito hospitalar[cite: 2240].
+        * **Grupo RD (AIH Reduzida):** É a tabela padrão-ouro para análise epidemiológica de internações no país. Cada linha representa uma internação consolidada e efetiva de paciente que ocupou leito hospitalar.
         * **Grupo SP (Serviços Profissionais):** Registra atos e procedimentos efetuados pelos profissionais de saúde vinculados ao faturamento hospitalar. Um único paciente pode gerar dezenas de linhas neste grupo. **Nunca utilize a contagem de linhas do grupo SP como métrica de internações**, sob risco de erro metodológico grave de superestimativa.
         * **Grupo ER (Emergência Referenciada):** Grupo técnico contendo fluxos específicos e dados de rejeições hospitalares com erros operacionais, mantido sob caráter de análise experimental.
         * **Grupo CM (Cirurgias Ambulatoriais):** Fluxo não geral que agrupa cirurgias de curtíssima permanência. Devido ao limbo de faturamento, hospitais preferem reportar esses procedimentos no **SIA (Sistema Ambulatorial)**. Logo, possui subnotificação endêmica e está desativado para o fluxo mensal comum por UF nesta versão.
         
         **Campos Estruturais Mapeados (PCDaS / Fiocruz & Base dos Dados):**
-        * `N_AIH`: Número identificador nacional único da Autorização de Internação Hospitalar[cite: 1691].
-        * `MUNIC_RES` / `MUNIC_MOV`: Município de residência do paciente e município de movimentação da unidade hospitalar[cite: 1691].
-        * `VAL_SH` / `VAL_SP` / `VAL_TOT`: Divisão operacional de custos hospitalares. `VAL_SH` (Serviços Hospitalares), `VAL_SP` (Serviços Profissionais) e `VAL_TOT` (Valor total repassado de faturamento)[cite: 1691].
-        * `UTI_MES_TO`: Quantidade consolidada de diárias em leito de Unidade de Terapia Intensiva no mês de competência faturado[cite: 1691].
+        * `N_AIH`: Número identificador nacional único da Autorização de Internação Hospitalar.
+        * `MUNIC_RES` / `MUNIC_MOV`: Município de residência do paciente e município de movimentação da unidade hospitalar.
+        * `VAL_SH` / `VAL_SP` / `VAL_TOT`: Divisão operacional de custos hospitalares. `VAL_SH` (Serviços Hospitalares), `VAL_SP` (Serviços Profissionais) e `VAL_TOT` (Valor total repassado de faturamento).
+        * `UTI_MES_TO`: Quantidade consolidada de diárias em leito de Unidade de Terapia Intensiva no mês de competência faturado.
         """)
 
     with st.expander("💀 SIM (Sistema de Informações sobre Mortalidade)"):
         st.markdown("""
-        * **Resumo:** Registros de óbitos com campos demográficos e causas de morte codificadas por CID-10[cite: 2245].
-        * **CAUSABAS:** A causa básica do óbito (CID-10), crucial para análises de mortalidade[cite: 2246].
+        * **Resumo:** Registros de óbitos com campos demográficos e causas de morte codificadas por CID-10.
+        * **CAUSABAS:** A causa básica do óbito (CID-10), crucial para análises de mortalidade.
         """)
         
     with st.expander("👶 SINASC (Sistema de Informações sobre Nascidos Vivos)"):
         st.markdown("""
-        * **Resumo:** Dados sobre os recém-nascidos, perfil demográfico das mães e características do parto no Brasil[cite: 2250].
+        * **Resumo:** Dados sobre os recém-nascidos, perfil demográfico das mães e características do parto no Brasil.
         """)
 
     with st.expander("🔬 SINAN (Sistema de Informação de Agravos de Notificação)"):
         st.markdown("""
-        * **Resumo:** Cadastro nacional de notificações de doenças compulsórias. Monitora perfis epidemiológicos a partir de notificações estaduais[cite: 2235].
+        * **Resumo:** Cadastro nacional de notificações de doenças compulsórias. Monitora perfis epidemiológicos a partir de notificações estaduais.
         """)
 
     st.markdown("---")
