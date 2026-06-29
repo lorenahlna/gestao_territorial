@@ -3098,11 +3098,9 @@ if aba_ativa == "📋 Guia Principal (Extração)":
 
 
 
-                            col_res = next((c for c in df_tratado.columns if c in cols_dict.get("res", [])), None)
-
-
-
-                            col_oco = next((c for c in df_tratado.columns if c in cols_dict.get("oco", [])), None)
+                            # Busca robusta por colunas (ignora case e espacos)
+                            col_res = next((c for c in df_tratado.columns if c.upper().strip() in [x.upper() for x in cols_dict.get("res", [])]), None)
+                            col_oco = next((c for c in df_tratado.columns if c.upper().strip() in [x.upper() for x in cols_dict.get("oco", [])]), None)
 
 
 
