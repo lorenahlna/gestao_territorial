@@ -51,14 +51,17 @@ def listar_anos_disponiveis(sistema="GERAL"):
     ano_inicial, ano_final = limites.get(sistema, (1995, ano_atual - 1))
     return list(range(ano_final, ano_inicial - 1, -1))
 
+# 🌟 RADAR EXPANDIDO DE COLUNAS TERRITORIAIS (BLINDADO)
 def obter_colunas_territoriais(sistema, grupo=None):
     if "SIH" in sistema:
         if grupo == "SP": return {"res": ["SP_MUNRES", "MUNIC_RES", "MUN_RES"], "oco": ["SP_MUNIC", "SP_MUNMOV", "SP_GESTOR", "MUNIC_MOV", "GESTOR_COD"]}
         return {"res": ["MUNIC_RES"], "oco": ["MUNIC_MOV", "GESTOR_COD"]}
+    # ALTERAÇÃO: adicionado CODMUNNAT (naturalidade) como residência
     if "SIM" in sistema:
         return {"res": ["CODMUNRES", "MUNIC_RES", "CODMUNNAT"], "oco": ["CODMUNOCOR", "CODMUNCART", "MUNIC_OCO", "MUNIC_MOV"]}
     if "SINASC" in sistema:
         return {"res": ["CODMUNRES", "MUNIC_RES"], "oco": ["CODMUNNASC", "CODMUNESTAB", "COMUNESTAB", "MUNIC_MOV"]}
+    # ALTERAÇÃO: removido ID_UNIDADE (código CNES) – agora só ID_MUNICIP
     if "SINAN" in sistema:
         return {"res": ["ID_MN_RESI"], "oco": ["ID_MUNICIP"]}
     if "CNES" in sistema:
@@ -364,6 +367,7 @@ def normalizar_lista_arquivos_pysus(res):
     if hasattr(res, "path"): return [str(res.path)]
     return [str(res)]
 
+# 🌟 SIH-SP: LOGICA RESTAURADA DO CODIGO ESTÁVEL V20
 def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     if isinstance(arquivos, pd.DataFrame): return arquivos
     ano2 = str(ano)[-2:]
@@ -510,9 +514,6 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
     id_filtro = id_datasus_alvo if nivel_terr == "Município" else ""
 
     for uf in ufs_lista:
-        # -- CORREÇÃO: usar o código IBGE para a API, mas manter a sigla para os filtros --
-        uf_code = ESTADOS_IBGE.get(uf, uf)  # fallback para sigla se não encontrar
-
         if "SIH" in sistema:
             if sih_grupo == "CM":
                 st.error("O grupo SIH/CM exige rotina própria via pysus.ftp.databases.sih.SIH e não será processado no fluxo mensal UF/município desta versão.")
@@ -581,11 +582,9 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
         arquivos_lidos = 0
         try:
             if "SIM" in sistema:
-                # Tenta primeiro com a sigla (padrão do PySUS)
                 try:
                     res = api_sim(state=uf, year=ano)
                 except Exception:
-                    # Se falhar, tenta com o código numérico
                     uf_code = ESTADOS_IBGE.get(uf, uf)
                     res = api_sim(state=uf_code, year=ano)
                 df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
@@ -642,6 +641,7 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
             return pd.DataFrame({"Erro": [f"Falha de conexão ou arquivo inexistente no DATASUS para os filtros selecionados. Detalhes: {'; '.join(falhas[:2])}"] })
     return pd.concat(partes_final, ignore_index=True)
 
+# 🌟 TRATAMENTO DE VARIAVEIS (CBO, CID, IDADE, BAIRRO)
 def tratar_e_traduzir_df(df, sistema):
     df_tratado = df.copy()
     df_tratado.columns = [str(c).upper().strip() for c in df_tratado.columns]
@@ -681,6 +681,7 @@ def tratar_e_traduzir_df(df, sistema):
     if "FANTASIA" in df_tratado.columns: df_tratado["Nome Unidade"] = df_tratado["FANTASIA"]
     if "NO_FANTASIA" in df_tratado.columns: df_tratado["Nome Unidade"] = df_tratado["NO_FANTASIA"]
     
+    # 🌟 NOVO CNES: Identificação precisa do SUS e dos Tipos de Estabelecimento
     col_sus = next((c for c in df_tratado.columns if c in ["VINC_SUS", "ATENDE_SUS", "CONVENIO_SUS"]), None)
     if col_sus: 
         df_tratado["Atende SUS?"] = df_tratado[col_sus].astype(str).str.replace('.0','', regex=False).map({"1": "Sim", "0": "Não", "S": "Sim", "N": "Não"}).fillna("Não Informado")
@@ -688,6 +689,7 @@ def tratar_e_traduzir_df(df, sistema):
     if "TP_UNID" in df_tratado.columns:
         df_tratado["Tipo de Estabelecimento"] = df_tratado["TP_UNID"].apply(decodificar_tp_unid)
 
+    # 🌟 SIM: Recriação dos Dicionários de Óbito
     dic_circ = {"1": "Acidente", "2": "Suicídio", "3": "Homicídio", "4": "Outros", "9": "Ignorado"}
     col_circ = next((c for c in df_tratado.columns if c in ["CIRCOBITO"]), None)
     if col_circ:
@@ -974,6 +976,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                         
                         tab1, tab2, tab3 = st.tabs(["✅ Planilha Tratada", "⚙️ Planilha Bruta", "📈 Painel de Hospitais e Clínicas" if "CNES" in sistema else "📈 Painel Analítico"])
                         
+                        # 🌟 VISUALIZAÇÃO COM SCROLL INFINITO (SEM CORTES)
                         with tab1:
                             st.dataframe(df_tratado, width="stretch")
                             st.download_button("📥 Baixar Tabela TRATADA Completa (CSV)", df_tratado.to_csv(index=False, sep=';', decimal=','), f"tratado_{sistema_titulo}_{nome_local}.csv", "text/csv")
@@ -987,6 +990,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             else:
                                 df_dash = df_tratado.copy()
                                 
+                                # 🌟 FOCO AUTOMÁTICO DO DASHBOARD (Sem bolinhas interativas)
                                 if nivel_terr == "Município" and "CNES" not in sistema:
                                     if "SIH" in sistema:
                                         if cols_oco_existentes:
@@ -1114,9 +1118,10 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                         st.write("### Circunstância do Óbito (Não Naturais)")
                                         st.bar_chart(df_dash["Circunstância do Óbito"].value_counts())
                     else:
-                        # Exibe detalhes da falha se houver
                         msg = df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados disponíveis."
-                        st.error(msg)
+                        if "território, período ou agravo" in msg:
+                            st.info("ℹ️ A consulta foi executada com sucesso, mas não foram encontrados registros de notificações para o agravo, território e período selecionados.")
+                        else: st.error(msg)
 
 # --- ABA DE DICIONÁRIOS E CITAÇÕES ---
 elif aba_ativa == "📚 Dicionários e Citações":
