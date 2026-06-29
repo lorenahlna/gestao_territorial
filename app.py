@@ -272,42 +272,62 @@ def leitura_segura_parquet(caminho, limite=50000):
 # ===================================================================
 def processar_sim_uf(uf, ano, nivel_terr, id_filtro, mes_num, cols_alvo_dict, dt_alvos, tipo_resultado):
     df_geral = pd.DataFrame()
+    df_fdef processar_sim_uf(uf, ano, nivel_terr, id_filtro, mes_num, cols_alvo_dict, dt_alvos, tipo_resultado):
+    """
+    Baixa e processa SIM (DO + DOFET) usando api_sim e api_sim_direct.
+    """
+    df_geral = pd.DataFrame()
     df_fetal = pd.DataFrame()
     mensagens = []
 
-    try:
-        from pysus.online_data.SIM import download as download_sim
-    except ImportError:
-        mensagens.append("❌ Módulo pysus.online_data.SIM não encontrado.")
-        return df_geral, mensagens
+    # Função auxiliar para baixar um grupo específico (DO ou DOFET)
+    def baixar_grupo(uf, ano, grupo="DO"):
+        res = None
+        # 1ª tentativa: api_sim_direct (mais direta)
+        if api_sim_direct is not None:
+            try:
+                if grupo == "DO":
+                    res = api_sim_direct(uf, int(ano))
+                else:
+                    res = api_sim_direct(uf, int(ano), grupo)
+                if res is not None:
+                    return res
+            except Exception as e:
+                pass
+        # 2ª tentativa: api_sim (via API antiga)
+        if api_sim is not None:
+            try:
+                if grupo == "DO":
+                    res = api_sim(state=uf, year=int(ano))
+                else:
+                    res = api_sim(state=uf, year=int(ano), group=grupo)
+                if res is not None:
+                    return res
+            except Exception as e:
+                pass
+        return None
 
     # --- DO (mortalidade geral) ---
     st.info(f"⬇️ Baixando SIM/DO para {uf}/{ano}...")
-    try:
-        res_geral = download_sim(uf, int(ano), group="DO")
-        if res_geral is not None:
-            mensagens.append("Online DO obtido.")
-            df_geral, _ = processar_retorno_pysus_duckdb(
-                res_geral, cols_alvo_dict, id_filtro, "Mortalidade (SIM)", nivel_terr, uf, mes_num, dt_alvos, tipo_resultado
-            )
-        else:
-            mensagens.append("❌ DO não disponível via online.")
-    except Exception as e:
-        mensagens.append(f"Erro no DO online: {e}")
+    res_geral = baixar_grupo(uf, ano, "DO")
+    if res_geral is not None:
+        mensagens.append("DO obtido via api_sim.")
+        df_geral, _ = processar_retorno_pysus_duckdb(
+            res_geral, cols_alvo_dict, id_filtro, "Mortalidade (SIM)", nivel_terr, uf, mes_num, dt_alvos, tipo_resultado
+        )
+    else:
+        mensagens.append("❌ DO não disponível (api_sim falhou).")
 
     # --- DOFET (mortalidade fetal) ---
     st.info(f"⬇️ Baixando SIM/DOFET para {uf}/{ano}...")
-    try:
-        res_fetal = download_sim(uf, int(ano), group="DOFET")
-        if res_fetal is not None:
-            mensagens.append("Online DOFET obtido.")
-            df_fetal, _ = processar_retorno_pysus_duckdb(
-                res_fetal, cols_alvo_dict, id_filtro, "Mortalidade (SIM)", nivel_terr, uf, mes_num, dt_alvos, tipo_resultado
-            )
-        else:
-            mensagens.append("❌ DOFET não disponível via online.")
-    except Exception as e:
-        mensagens.append(f"Erro no DOFET online: {e}")
+    res_fetal = baixar_grupo(uf, ano, "DOFET")
+    if res_fetal is not None:
+        mensagens.append("DOFET obtido via api_sim.")
+        df_fetal, _ = processar_retorno_pysus_duckdb(
+            res_fetal, cols_alvo_dict, id_filtro, "Mortalidade (SIM)", nivel_terr, uf, mes_num, dt_alvos, tipo_resultado
+        )
+    else:
+        mensagens.append("❌ DOFET não disponível (api_sim falhou).")
 
     # --- Combinar ---
     df_combined = pd.DataFrame()
@@ -324,7 +344,6 @@ def processar_sim_uf(uf, ano, nivel_terr, id_filtro, mes_num, cols_alvo_dict, dt
         mensagens.append(f"✅ Total combinado: {len(df_combined)} registros.")
 
     return df_combined, mensagens
-
 # ===================================================================
 # FUNÇÃO PRINCIPAL DE BUSCA (MODIFICADA PARA USAR O NOVO MÓDULO SIM)
 # ===================================================================
