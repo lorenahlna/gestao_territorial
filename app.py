@@ -1,14 +1,47 @@
 import streamlit as st
+
+
+
 import pandas as pd
+
+
+
 import requests
+
+
+
 import io
+
+
+
 import urllib3
+
+
+
 import gc
+
+
+
 import os
+
+
+
 import shutil
+
+
+
 import time
+
+
+
 import threading
+
+
+
 import duckdb
+
+
+
 from datetime import datetime
 
 
@@ -3161,51 +3194,20 @@ if aba_ativa == "📋 Guia Principal (Extração)":
 
 
 
-                            if col_oco and col_res:
-
-
-
+                                                        if col_oco and col_res:
                                 df_tratado[col_res] = df_tratado[col_res].apply(normalizar_codigo)
-
-
-
                                 df_tratado[col_oco] = df_tratado[col_oco].apply(normalizar_codigo)
 
+                                # Garantir que as máscaras usem os códigos de 6 dígitos do DATASUS
+                                cod6 = str(id_datasus_alvo)[:6]
+                                mask_res = df_tratado[col_res].astype(str).str.startswith(cod6)
+                                mask_oco = df_tratado[col_oco].astype(str).str.startswith(cod6)
 
-
-
-
-
-
-                                mask_res = df_tratado[col_res].astype(str).str.startswith(id_datasus_alvo[:6])
-
-
-
-                                mask_oco = df_tratado[col_oco].astype(str).str.startswith(id_datasus_alvo[:6])
-
-
-
-                                
-
-
-
-                                vol_oco = mask_oco.sum()
-
-
-
-                                vol_res = mask_res.sum()
-
-
-
-                                vol_ambos = (mask_oco & mask_res).sum()
-
-
-
-                                vol_oco_fora = (mask_oco & ~mask_res).sum()
-
-
-
-                                vol_res_fora = (mask_res & ~mask_oco).sum()
+                                vol_oco = int(mask_oco.sum())
+                                vol_res = int(mask_res.sum())
+                                vol_ambos = int((mask_oco & mask_res).sum())
+                                vol_oco_fora = int((mask_oco & ~mask_res).sum())
+                                vol_res_fora = int((mask_res & ~mask_oco).sum())
 
 
 
@@ -3280,11 +3282,8 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     c4.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>💰 CUSTO RESIDÊNCIA</h4><h2 style="color:#28a745; margin:0;">{f_br(custo_res)}</h2><p>Gasto com Moradores</p></div>', unsafe_allow_html=True)
 
                                 elif "SIM" in sistema:
-
                                     c1, c2 = st.columns(2)
-
                                     c1.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 Óbitos por Município de Ocorrência</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2><p>Ocorreram no município</p></div>', unsafe_allow_html=True)
-
                                     c2.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>🏠 Óbitos de Moradores do Município</h4><h2 style="color:#28a745; margin:0;">{vol_res:,}</h2><p>Moradores locais</p></div>', unsafe_allow_html=True)
 
                                 else:
