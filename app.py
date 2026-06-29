@@ -226,7 +226,7 @@ def obter_colunas_territoriais(sistema, grupo=None):
 
 
 
-    if "SIM" in sistema: return {"res": ["CODMUNRES"], "oco": ["CODMUNOCO", "CODMUNOCOR"]}
+    if "SIM" in sistema: return {"res": ["CODMUNRES", "Município Residência", "MUNICÍPIO RESIDÊNCIA"], "oco": ["CODMUNOCO", "CODMUNOCOR", "Município Ocorrência", "MUNICÍPIO OCORRÊNCIA"]}
 
 
 
