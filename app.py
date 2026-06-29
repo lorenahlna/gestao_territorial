@@ -3194,14 +3194,18 @@ if aba_ativa == "📋 Guia Principal (Extração)":
 
 
 
-                                                        if col_oco and col_res:
+                            if col_oco and col_res:
                                 df_tratado[col_res] = df_tratado[col_res].apply(normalizar_codigo)
                                 df_tratado[col_oco] = df_tratado[col_oco].apply(normalizar_codigo)
 
-                                # Garantir que as máscaras usem os códigos de 6 dígitos do DATASUS
+                                # Garantir que as mascaras usem os codigos de 6 digitos do DATASUS
+                                # O DATASUS utiliza 6 digitos para identificar o municipio nos arquivos de microdados
                                 cod6 = str(id_datasus_alvo)[:6]
-                                mask_res = df_tratado[col_res].astype(str).str.startswith(cod6)
-                                mask_oco = df_tratado[col_oco].astype(str).str.startswith(cod6)
+                                
+                                # No SIM, as colunas territoriais originais sao CODMUNRES e CODMUNOCOR/CODMUNOCO
+                                # Vamos garantir que a contagem seja feita sobre os valores normalizados
+                                mask_res = df_tratado[col_res].astype(str).str.replace(".0", "", regex=False).str.strip().str.startswith(cod6)
+                                mask_oco = df_tratado[col_oco].astype(str).str.replace(".0", "", regex=False).str.strip().str.startswith(cod6)
 
                                 vol_oco = int(mask_oco.sum())
                                 vol_res = int(mask_res.sum())
