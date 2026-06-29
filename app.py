@@ -1,4 +1,4 @@
-# VERSAO_FINAL_PRODUCAO_SUPER_DASHBOARD_V33
+# VERSAO_FINAL_PRODUCAO_SUPER_DASHBOARD_V33_CORRIGIDO
 import streamlit as st
 import pandas as pd
 import requests
@@ -51,7 +51,6 @@ def listar_anos_disponiveis(sistema="GERAL"):
     ano_inicial, ano_final = limites.get(sistema, (1995, ano_atual - 1))
     return list(range(ano_final, ano_inicial - 1, -1))
 
-# 🌟 RADAR EXPANDIDO DE COLUNAS TERRITORIAIS (BLINDADO)
 def obter_colunas_territoriais(sistema, grupo=None):
     if "SIH" in sistema:
         if grupo == "SP": return {"res": ["SP_MUNRES", "MUNIC_RES", "MUN_RES"], "oco": ["SP_MUNIC", "SP_MUNMOV", "SP_GESTOR", "MUNIC_MOV", "GESTOR_COD"]}
@@ -268,6 +267,247 @@ def leitura_segura_parquet(caminho, limite=50000):
     except Exception as e:
         return pd.DataFrame()
 
+# ===================================================================
+# MÓDULO SIM COM FTP DIRETO E FALLBACKS (CORREÇÃO PARA RJ/SP)
+# ===================================================================
+def baixar_sim_ftp(uf, ano, grupo="DO"):
+    """
+    Tenta baixar os dados do SIM via FTP (pysus.ftp.databases.sim.SIM).
+    Retorna lista de caminhos ou None.
+    """
+    try:
+        from pysus.ftp.databases.sim import SIM
+        motor = SIM()
+        motor.load()
+        arquivos = motor.get_files(state=uf, year=str(ano)[-2:], group=grupo)
+        if not arquivos:
+            return None
+        caminhos = motor.download(arquivos)
+        return caminhos
+    except Exception as e:
+        st.warning(f"FTP SIM {grupo} falhou para {uf}/{ano}: {e}")
+        return None
+
+def baixar_sim_online(uf, ano, grupo="DO"):
+    """
+    Tenta via pysus.online_data.SIM.download ou api_sim.
+    """
+    try:
+        from pysus.online_data.SIM import download as download_sim
+        res = download_sim(uf, int(ano), group=grupo)
+        return res
+    except:
+        pass
+    try:
+        if grupo == "DO":
+            res = api_sim(state=uf, year=int(ano))
+        else:
+            res = api_sim(state=uf, year=int(ano), group=grupo)
+        return res
+    except:
+        return None
+
+def processar_sim_uf(uf, ano, nivel_terr, id_filtro, mes_num, cols_alvo_dict, dt_alvos, tipo_resultado):
+    """
+    Função unificada para baixar e processar SIM (DO + DOFET) para um estado.
+    Retorna DataFrame consolidado e lista de mensagens de diagnóstico.
+    """
+    df_geral = pd.DataFrame()
+    df_fetal = pd.DataFrame()
+    mensagens = []
+
+    # --- 1) Baixar DO (mortalidade geral) ---
+    st.info(f"⬇️ Baixando SIM/DO para {uf}/{ano}...")
+    res_geral = None
+    caminhos_ftp = baixar_sim_ftp(uf, ano, "DO")
+    if caminhos_ftp:
+        mensagens.append(f"FTP DO: {len(caminhos_ftp)} arquivos baixados.")
+        df_geral, _ = processar_retorno_pysus_duckdb(
+            caminhos_ftp, cols_alvo_dict, id_filtro, "Mortalidade (SIM)", nivel_terr, uf, mes_num, dt_alvos, tipo_resultado
+        )
+    else:
+        st.info(f"Tentando online_data para DO...")
+        res_geral = baixar_sim_online(uf, ano, "DO")
+        if res_geral is not None:
+            mensagens.append("Online DO obtido.")
+            df_geral, _ = processar_retorno_pysus_duckdb(
+                res_geral, cols_alvo_dict, id_filtro, "Mortalidade (SIM)", nivel_terr, uf, mes_num, dt_alvos, tipo_resultado
+            )
+        else:
+            mensagens.append("❌ DO não disponível.")
+
+    # --- 2) Baixar DOFET (mortalidade fetal) ---
+    st.info(f"⬇️ Baixando SIM/DOFET para {uf}/{ano}...")
+    res_fetal = None
+    caminhos_ftp_fetal = baixar_sim_ftp(uf, ano, "DOFET")
+    if caminhos_ftp_fetal:
+        mensagens.append(f"FTP DOFET: {len(caminhos_ftp_fetal)} arquivos baixados.")
+        df_fetal, _ = processar_retorno_pysus_duckdb(
+            caminhos_ftp_fetal, cols_alvo_dict, id_filtro, "Mortalidade (SIM)", nivel_terr, uf, mes_num, dt_alvos, tipo_resultado
+        )
+    else:
+        st.info(f"Tentando online_data para DOFET...")
+        res_fetal = baixar_sim_online(uf, ano, "DOFET")
+        if res_fetal is not None:
+            mensagens.append("Online DOFET obtido.")
+            df_fetal, _ = processar_retorno_pysus_duckdb(
+                res_fetal, cols_alvo_dict, id_filtro, "Mortalidade (SIM)", nivel_terr, uf, mes_num, dt_alvos, tipo_resultado
+            )
+        else:
+            mensagens.append("❌ DOFET não disponível.")
+
+    # --- 3) Combinar ---
+    df_combined = pd.DataFrame()
+    if not df_geral.empty:
+        df_combined = pd.concat([df_combined, df_geral], ignore_index=True)
+    if not df_fetal.empty:
+        if "TIPOBITO" not in df_fetal.columns:
+            df_fetal["TIPOBITO"] = 1
+        df_combined = pd.concat([df_combined, df_fetal], ignore_index=True)
+
+    if df_combined.empty:
+        mensagens.append("⚠️ Nenhum dado do SIM obtido para esta UF/ano.")
+    else:
+        mensagens.append(f"✅ Total combinado: {len(df_combined)} registros.")
+
+    return df_combined, mensagens
+
+# ===================================================================
+# FUNÇÃO PRINCIPAL DE BUSCA (MODIFICADA PARA USAR O NOVO MÓDULO SIM)
+# ===================================================================
+def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo="", tipo_resultado="Amostra limitada de microdados"):
+    if not api_sim and not api_sim_direct: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
+    partes_final = [] 
+    meses_para_baixar = [mes_num] if mes_num else [None]
+    cols_alvo_dict = obter_colunas_territoriais(sistema, sih_grupo)
+    dt_alvos = ["DTOBITO", "DTNASC", "DT_NOTIFIC", "DT_INTER"]
+    falhas = []
+    sucessos_download = 0
+    id_filtro = id_datasus_alvo if nivel_terr == "Município" else ""
+
+    for uf in ufs_lista:
+        if "SIH" in sistema:
+            if sih_grupo == "CM":
+                st.error("O grupo SIH/CM exige rotina própria via pysus.ftp.databases.sih.SIH e não será processado no fluxo mensal UF/município desta versão.")
+                st.stop()
+                
+            for m in meses_para_baixar:
+                df_temp = pd.DataFrame()
+                prefixo_token = f"{sih_grupo}{uf}{str(ano)[-2:]}{int(m):02d}" if m else f"{sih_grupo}{uf}{str(ano)[-2:]}"
+                prefixo_token = prefixo_token.upper()
+
+                limpar_cache_pysus_sih()
+
+                res = None
+                try: res = baixar_sih_motor_raiz(uf, ano, m, sih_grupo)
+                except Exception: pass
+                if not res: res = baixar_sih_validado(uf, ano, m, sih_grupo)
+                if not res: res = baixar_sih_fallback_api(uf, ano, m, sih_grupo)
+
+                if res is None:
+                    falhas.append(f"SIH SEM REGISTROS OU ARQUIVO NÃO PUBLICADO PELO DATASUS | {uf} {ano}/{m}")
+                    continue
+
+                arquivos_norm = normalizar_lista_arquivos_pysus(res)
+
+                if isinstance(arquivos_norm, pd.DataFrame):
+                    df_temp = aplicar_filtros_imediato(arquivos_norm, sistema, nivel_terr, uf, id_filtro, m, cols_alvo_dict, dt_alvos, grupo=sih_grupo)
+                else:
+                    arquivos_norm = filtrar_arquivos_sih_exatos(arquivos_norm, uf, ano, m, sih_grupo)
+                    df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
+                        arquivos_norm, cols_alvo_dict, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado, prefixo_esperado=prefixo_token
+                    )
+                
+                if not df_temp.empty:
+                    partes_final.append(df_temp)
+                    sucessos_download += 1
+                else:
+                    falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO TERRITORIAL | {uf} {ano}")
+            continue
+
+        if "CNES" in sistema:
+            for m in meses_para_baixar:
+                df_temp = pd.DataFrame()
+                arquivos_lidos = 0
+                try:
+                    prefixo_token = f"{cnes_grupo}{uf}{str(ano)[-2:]}{int(m):02d}".upper()
+                    try: res = api_cnes(state=uf, year=ano, month=m, group=cnes_grupo)
+                    except: res = None
+                    df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado, prefixo_esperado=prefixo_token)
+                except Exception as e:
+                    falhas.append(f"Erro {sistema} | {uf} {ano}/{m}: {e}")
+                    continue
+
+                if not df_temp.empty:
+                    df_temp = aplicar_filtros_imediato(df_temp, sistema, nivel_terr, uf, id_datasus_alvo, m, cols_alvo_dict, dt_alvos)
+                    if not df_temp.empty:
+                        partes_final.append(df_temp)
+                        sucessos_download += 1
+                    else: falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO FINAL | {uf} {ano}")
+                else:
+                    if arquivos_lidos > 0: falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO TERRITORIAL | {uf} {ano}")
+                    else: falhas.append(f"{sistema} FALHA DE DOWNLOAD OU ARQUIVO INEXISTENTE | {uf} {ano}")
+            continue
+
+        # ====== MORTALIDADE (SIM) – USANDO NOVO MÓDULO ======
+        if "SIM" in sistema:
+            df_temp = pd.DataFrame()
+            try:
+                df_temp, msgs = processar_sim_uf(uf, ano, nivel_terr, id_filtro, mes_num, cols_alvo_dict, dt_alvos, tipo_resultado)
+                for msg in msgs:
+                    st.info(f"🔍 {msg}")
+                if not df_temp.empty:
+                    df_temp = aplicar_filtros_imediato(df_temp, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo_dict, dt_alvos)
+                    if not df_temp.empty:
+                        partes_final.append(df_temp)
+                        sucessos_download += 1
+                    else:
+                        falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO FINAL | {uf} {ano}")
+                else:
+                    falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO TERRITORIAL | {uf} {ano}")
+            except Exception as e:
+                falhas.append(f"Erro crítico SIM | {uf} {ano}: {e}")
+                st.error(f"Erro ao processar SIM para {uf}/{ano}: {e}")
+            continue
+
+        # ====== OUTROS SISTEMAS (SINASC, SINAN) ======
+        df_temp = pd.DataFrame()
+        arquivos_lidos = 0
+        try:
+            if "SINASC" in sistema: 
+                res = api_sinasc(state=uf, year=ano)
+                df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_filtro, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado)
+            elif "SINAN" in sistema:
+                try:
+                    from pysus.online_data.SINAN import download as download_sinan
+                    res = download_sinan(disease=agravo, years=[ano], states=[uf])
+                except:
+                    try: res = api_sinan(disease=agravo, year=ano)
+                    except: res = api_sinan(disease=agravo, state=uf, year=ano)
+                df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_filtro, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado)
+        except Exception as e:
+            falhas.append(f"Download Error {sistema} | {uf} {ano}: {e}")
+            continue
+
+        if not df_temp.empty:
+            df_temp = aplicar_filtros_imediato(df_temp, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo_dict, dt_alvos)
+            if not df_temp.empty:
+                partes_final.append(df_temp)
+                sucessos_download += 1
+            else: falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO FINAL | {uf} {ano}")
+        else:
+            if arquivos_lidos > 0: falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO TERRITORIAL | {uf} {ano}")
+            else: falhas.append(f"{sistema} FALHA DE DOWNLOAD OU ARQUIVO INEXISTENTE | {uf} {ano}")
+        gc.collect()
+            
+    if not partes_final:
+        if any("SEM REGISTROS" in f for f in falhas):
+            return pd.DataFrame({"Erro": ["A base foi processada, mas não há registros para o território, período ou agravo selecionados. O Datasus pode não ter publicado esses dados ainda."] })
+        else:
+            return pd.DataFrame({"Erro": ["Falha de conexão ou arquivo inexistente no DATASUS para os filtros selecionados."] })
+    return pd.concat(partes_final, ignore_index=True)
+
+# Funções auxiliares para SIH (já existentes no original)
 def baixar_sih_motor_raiz(uf, ano, mes, grupo):
     try:
         from pysus.ftp.databases.sih import SIH
@@ -421,7 +661,6 @@ def processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_alvo, sistema, nivel_
                         
                         if where_clauses:
                             where_str = " OR ".join(where_clauses)
-                            # 🌟 DUPLO CAST ROBUSTO EM DUCKDB: Evita perda de registros por flutuação (ex: 2.0 vs 2)
                             if "SIM" in sistema and "TIPOBITO" in cols_upper:
                                 col_tb = cols_parquet[cols_upper.index("TIPOBITO")]
                                 query = f"SELECT * FROM read_parquet('{caminho_sql}') WHERE ({where_str}) AND (TRY_CAST(TRY_CAST(\"{col_tb}\" AS DOUBLE) AS INT) IN (1, 2) OR \"{col_tb}\" IS NULL)"
@@ -493,174 +732,6 @@ def gerar_metricas_cnes(df, grupo):
         metricas["principal_label"] = "Registros processados"
         metricas["principal_value"] = len(df)
     return metricas
-
-def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo="", tipo_resultado="Amostra limitada de microdados"):
-    if not api_sim and not api_sim_direct: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
-    partes_final = [] 
-    meses_para_baixar = [mes_num] if mes_num else [None]
-    cols_alvo_dict = obter_colunas_territoriais(sistema, sih_grupo)
-    dt_alvos = ["DTOBITO", "DTNASC", "DT_NOTIFIC", "DT_INTER"]
-    falhas = []
-    sucessos_download = 0
-    id_filtro = id_datasus_alvo if nivel_terr == "Município" else ""
-
-    for uf in ufs_lista:
-        if "SIH" in sistema:
-            if sih_grupo == "CM":
-                st.error("O grupo SIH/CM exige rotina própria via pysus.ftp.databases.sih.SIH e não será processado no fluxo mensal UF/município desta versão.")
-                st.stop()
-                
-            for m in meses_para_baixar:
-                df_temp = pd.DataFrame()
-                prefixo_token = f"{sih_grupo}{uf}{str(ano)[-2:]}{int(m):02d}" if m else f"{sih_grupo}{uf}{str(ano)[-2:]}"
-                prefixo_token = prefixo_token.upper()
-
-                limpar_cache_pysus_sih()
-
-                res = None
-                try: res = baixar_sih_motor_raiz(uf, ano, m, sih_grupo)
-                except Exception: pass
-                if not res: res = baixar_sih_validado(uf, ano, m, sih_grupo)
-                if not res: res = baixar_sih_fallback_api(uf, ano, m, sih_grupo)
-
-                if res is None:
-                    falhas.append(f"SIH SEM REGISTROS OU ARQUIVO NÃO PUBLICADO PELO DATASUS | {uf} {ano}/{m}")
-                    continue
-
-                arquivos_norm = normalizar_lista_arquivos_pysus(res)
-
-                if isinstance(arquivos_norm, pd.DataFrame):
-                    df_temp = aplicar_filtros_imediato(arquivos_norm, sistema, nivel_terr, uf, id_filtro, m, cols_alvo_dict, dt_alvos, grupo=sih_grupo)
-                else:
-                    arquivos_norm = filtrar_arquivos_sih_exatos(arquivos_norm, uf, ano, m, sih_grupo)
-                    df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
-                        arquivos_norm, cols_alvo_dict, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado, prefixo_esperado=prefixo_token
-                    )
-                
-                if not df_temp.empty:
-                    partes_final.append(df_temp)
-                    sucessos_download += 1
-                else:
-                    falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO TERRITORIAL | {uf} {ano}")
-            continue
-
-        if "CNES" in sistema:
-            for m in meses_para_baixar:
-                df_temp = pd.DataFrame()
-                arquivos_lidos = 0
-                try:
-                    prefixo_token = f"{cnes_grupo}{uf}{str(ano)[-2:]}{int(m):02d}".upper()
-                    try: res = api_cnes(state=uf, year=ano, month=m, group=cnes_grupo)
-                    except: res = None
-                    df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado, prefixo_esperado=prefixo_token)
-                except Exception as e:
-                    falhas.append(f"Erro {sistema} | {uf} {ano}/{m}: {e}")
-                    continue
-
-                if not df_temp.empty:
-                    df_temp = aplicar_filtros_imediato(df_temp, sistema, nivel_terr, uf, id_datasus_alvo, m, cols_alvo_dict, dt_alvos)
-                    if not df_temp.empty:
-                        partes_final.append(df_temp)
-                        sucessos_download += 1
-                    else: falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO FINAL | {uf} {ano}")
-                else:
-                    if arquivos_lidos > 0: falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO TERRITORIAL | {uf} {ano}")
-                    else: falhas.append(f"{sistema} FALHA DE DOWNLOAD OU ARQUIVO INEXISTENTE | {uf} {ano}")
-            continue
-
-        df_temp = pd.DataFrame()
-        arquivos_lidos = 0
-        try:
-            # 🌟 INTERFACE ESTRUTURAL NORMALIZADA PARA O SIM (MORTALIDADE): Resolve o travamento de SP e RJ
-            if "SIM" in sistema:
-                df_geral = pd.DataFrame()
-                df_fetal = pd.DataFrame()
-                
-                # --- A) DOWNLOAD DA MORTALIDADE GERAL (DO) ---
-                res_geral = None
-                if api_sim_direct is not None:
-                    try: res_geral = api_sim_direct(uf, int(ano))
-                    except: pass
-                if res_geral is None or (isinstance(res_geral, pd.DataFrame) and res_geral.empty):
-                    try: res_geral = api_sim(state=uf, year=int(ano))
-                    except: pass
-                if res_geral is None or (isinstance(res_geral, pd.DataFrame) and res_geral.empty):
-                    try:
-                        from pysus.online_data.SIM import download as download_sim
-                        res_geral = download_sim(uf, int(ano))
-                    except: pass
-                    
-                if res_geral is not None:
-                    res_geral_norm = normalizar_lista_arquivos_pysus(res_geral)
-                    df_geral, _ = processar_retorno_pysus_duckdb(res_geral_norm, cols_alvo_dict, id_filtro, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado)
-                
-                # --- B) DOWNLOAD DA MORTALIDADE FETAL (DOFET) ---
-                res_fetal = None
-                if api_sim_direct is not None:
-                    try: res_fetal = api_sim_direct(uf, int(ano), "DOFET")
-                    except: pass
-                if res_fetal is None or (isinstance(res_fetal, pd.DataFrame) and res_fetal.empty):
-                    try: res_fetal = api_sim(state=uf, year=int(ano), group="DOFET")
-                    except: pass
-                    
-                if res_fetal is not None:
-                    res_fetal_norm = normalizar_lista_arquivos_pysus(res_fetal)
-                    df_fetal, _ = processar_retorno_pysus_duckdb(res_fetal_norm, cols_alvo_dict, id_filtro, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado)
-                
-                # --- C) COMBINAÇÃO INTEGRAL DOS DADOS ---
-                lista_dfs = []
-                if df_geral is not None and not df_geral.empty:
-                    lista_dfs.append(df_geral)
-                if df_fetal is not None and not df_fetal.empty:
-                    if "TIPOBITO" not in df_fetal.columns:
-                        df_fetal["TIPOBITO"] = 1
-                    lista_dfs.append(df_fetal)
-                    
-                if lista_dfs:
-                    df_temp = pd.concat(lista_dfs, ignore_index=True)
-                    df_temp.columns = [str(c).upper().strip() for c in df_temp.columns]
-                    if "TIPOBITO" in df_temp.columns:
-                        df_temp["TIPOBITO_STR"] = df_temp["TIPOBITO"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
-                        df_temp = df_temp[df_temp["TIPOBITO_STR"].isin(["1", "2"]) | df_temp["TIPOBITO_STR"].isna() | (df_temp["TIPOBITO_STR"] == "NAN")].copy()
-                        df_temp = df_temp.drop(columns=["TIPOBITO_STR"])
-                    partes_final.append(df_temp)
-                    sucessos_download += 1
-                else:
-                    falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO TERRITORIAL | {uf} {ano}")
-                continue
-
-            elif "SINASC" in sistema: 
-                res = api_sinasc(state=uf, year=ano)
-                df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_filtro, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado)
-            elif "SINAN" in sistema:
-                try:
-                    from pysus.online_data.SINAN import download as download_sinan
-                    res = download_sinan(disease=agravo, years=[ano], states=[uf])
-                except:
-                    try: res = api_sinan(disease=agravo, year=ano)
-                    except: res = api_sinan(disease=agravo, state=uf, year=ano)
-                df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_filtro, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado)
-        except Exception as e:
-            falhas.append(f"Download Error {sistema} | {uf} {ano}: {e}")
-            continue
-
-        if not df_temp.empty:
-            df_temp = aplicar_filtros_imediato(df_temp, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo_dict, dt_alvos)
-            if not df_temp.empty:
-                partes_final.append(df_temp)
-                sucessos_download += 1
-            else: falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO FINAL | {uf} {ano}")
-        else:
-            if arquivos_lidos > 0: falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO TERRITORIAL | {uf} {ano}")
-            else: falhas.append(f"{sistema} FALHA DE DOWNLOAD OU ARQUIVO INEXISTENTE | {uf} {ano}")
-        gc.collect()
-            
-    if not partes_final:
-        if any("SEM REGISTROS" in f for f in falhas):
-            return pd.DataFrame({"Erro": ["A base foi processada, mas não há registros para o território, período ou agravo selecionados. O Datasus pode não ter publicado esses dados ainda."] })
-        else:
-            return pd.DataFrame({"Erro": ["Falha de conexão ou arquivo inexistente no DATASUS para os filtros selecionados."] })
-    return pd.concat(partes_final, ignore_index=True)
 
 def tratar_e_traduzir_df(df, sistema):
     df_tratado = df.copy()
@@ -900,7 +971,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
 
                                 st.markdown(f"### 📊 Visão Geral: {sistema_titulo} - {nome_local} ({periodo_label})")
                                 
-                                # 🌟 PAINEL DE QUATRO CARDS SEPARADOS (SIM): Totalmente preciso com o TabNet do DATASUS
+                                # ===== CORREÇÃO DOS CARDS PARA SIM =====
                                 if "SIM" in sistema and "TIPOBITO" in df_tratado.columns:
                                     df_tratado["TB_CLEAN"] = df_tratado["TIPOBITO"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
                                     
@@ -909,11 +980,13 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     res_geral = (mask_res & (df_tratado["TB_CLEAN"] == "2")).sum()
                                     res_fetal = (mask_res & (df_tratado["TB_CLEAN"] == "1")).sum()
                                     
-                                    c1, c2, c3, c4 = st.columns(4)
-                                    c1.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 OCORRÊNCIA GERAL</h4><h2 style="color:#007bff; margin:0;">{oco_geral:,}</h2><p>Óbitos Não Fetais na Cidade</p></div>', unsafe_allow_html=True)
-                                    c2.markdown(f'<div class="metric-card" style="border-left: 5px solid #0052cc;"><h4>👶 OCORRÊNCIA FETAL</h4><h2 style="color:#0052cc; margin:0;">{oco_fetal:,}</h2><p>Óbitos Fetais na Cidade</p></div>', unsafe_allow_html=True)
-                                    c3.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>🏠 RESIDÊNCIA GERAL</h4><h2 style="color:#28a745; margin:0;">{res_geral:,}</h2><p>Moradores Falecidos</p></div>', unsafe_allow_html=True)
-                                    c4.markdown(f'<div class="metric-card" style="border-left: 5px solid #1e7e34;"><h4>👶 RESIDÊNCIA FETAL</h4><h2 style="color:#1e7e34; margin:0;">{res_fetal:,}</h2><p>Óbitos Fetais de Moradores</p></div>', unsafe_allow_html=True)
+                                    # Soma dos totais
+                                    oco_total = oco_geral + oco_fetal
+                                    res_total = res_geral + res_fetal
+
+                                    c1, c2 = st.columns(2)
+                                    c1.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 OCORRÊNCIA TOTAL</h4><h2 style="color:#007bff; margin:0;">{oco_total:,}</h2><p>Óbitos (fetais + não fetais) na cidade</p></div>', unsafe_allow_html=True)
+                                    c2.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>🏠 RESIDÊNCIA TOTAL</h4><h2 style="color:#28a745; margin:0;">{res_total:,}</h2><p>Moradores (fetais + não fetais) falecidos</p></div>', unsafe_allow_html=True)
                                     
                                     df_tratado = df_tratado.drop(columns=["TB_CLEAN"])
                                 elif "SIH" in sistema:
