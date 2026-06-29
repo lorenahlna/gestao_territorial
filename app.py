@@ -1,4 +1,3 @@
-# VERSAO_FINAL_PRODUCAO_SUPER_DASHBOARD_V36
 import streamlit as st
 import pandas as pd
 import requests
@@ -41,14 +40,14 @@ trava_global = obter_trava_global()
 @st.cache_data
 def listar_anos_disponiveis(sistema="GERAL"):
     ano_atual = datetime.now().year
-    limites = {
+    limits = {
         "Mortalidade (SIM)": (1979, 2024),
         "Nascimentos (SINASC)": (1994, 2020),
         "Notificações (SINAN)": (2007, 2026),
         "Internações (SIH)": (2008, 2026),
         "Cadastro Nacional de Estabelecimentos (CNES)": (2005, ano_atual),
     }
-    ano_inicial, ano_final = limites.get(sistema, (1995, ano_atual - 1))
+    ano_inicial, ano_final = limits.get(sistema, (1995, ano_atual - 1))
     return list(range(ano_final, ano_inicial - 1, -1))
 
 # 🌟 DICIONÁRIO DE COLUNAS TERRITORIAIS CIRURGICAMENTE CORRIGIDO
@@ -243,9 +242,17 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
         if sistema not in ["Internações (SIH)", "Cadastro Nacional de Estabelecimentos (CNES)"]:
             if mes_num is not None and dt_col_real:
                 s = (df_t[dt_col_real].astype(str).str.replace(r"\.0$", "", regex=True).str.replace("-", "", regex=False).str.strip())
+                # 🌟 CORREÇÃO CRÍTICA: Se a data do SIM tiver 7 caracteres (ex: 5012023), põe o zero faltante na esquerda
+                s = s.apply(lambda x: x.zfill(8) if len(x) == 7 and x.isdigit() else x)
+                
                 mes_aaaammdd = pd.to_datetime(s, format="%Y%m%d", errors="coerce").dt.month
                 mes_ddmmaaaa = pd.to_datetime(s, format="%d%m%Y", errors="coerce").dt.month
                 meses_extraidos = mes_aaaammdd.fillna(mes_ddmmaaaa)
+                
+                # Fallback cirúrgico de extração direta por corte de texto se o to_datetime falhar
+                string_mes = s.apply(lambda x: int(x[2:4]) if len(x) == 8 and x.isdigit() and 1 <= int(x[2:4]) <= 12 else None)
+                meses_extraidos = meses_extraidos.fillna(string_mes)
+                
                 df_t = df_t[meses_extraidos == mes_num].copy()
             
         return df_t
@@ -643,6 +650,12 @@ def tratar_e_traduzir_df(df, sistema):
         col_loc = next((c for c in df_tratado.columns if c in ["LOCOCOR"]), None)
         if col_loc:
             df_tratado["Local de Ocorrência"] = df_tratado[col_loc].astype(str).str.replace(".0", "", regex=False).map(dic_lococor).fillna("Ignorado/Outros")
+            
+        # Tradução amigável da coluna TIPOBITO para visualização da tabela tratada
+        col_tipo = next((c for c in df_tratado.columns if c == "TIPOBITO"), None)
+        if col_tipo:
+            dic_tipo = {"1": "Não Fetal", "2": "Fetal", "9": "Ignorado"}
+            df_tratado["Tipo de Óbito (Fetal/Não Fetal)"] = df_tratado[col_tipo].astype(str).str.replace(".0", "", regex=False).str.strip().map(dic_tipo).fillna("Ignorado/Outros")
 
     for c_vbo in ["OCUP", "OCUPMAE", "CODOCUPMAE", "ID_OCUPA_N", "COD_CBO"]:
         if c_vbo in df_tratado.columns: df_tratado[c_vbo] = df_tratado[c_vbo].apply(decodificar_cbo)
@@ -710,7 +723,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
         agravo_sel = sih_grupo_sel = cnes_grupo_sel = nome_agravo = None
         
         if "SINAN" in sistema:
-            mapa_doencas = {"Acidente de trabalho": "ACGR", "Acidente de trabalho com material biológico": "ACBI", "AIDS em adultos": "AIDA", "AIDS em crianças": "AIDC", "Câncer Relacionado ao Trabalho": "CANC", "Chikungunya": "CHIK", "Dengue": "DENG", "Doença de Chagas": "CHAG", "Hepatites Virais": "HEPA", "HIV em adultos": "HIVA", "HIV em crianças": "HIVC", "HIV em crianças expostas": "HIVE", "Leptospirose": "LEPT", "Meningite": "MENI", "Perda Auditiva por Ruído (Trabalho)": "PAIR", "Raiva Humana": "RAIV", "Sífilis Adquirida": "SIFA", "Sífilis Congênita": "SIFC", "Sífilis em Gestante": "SIFG", "Transtornos Mentais (Trabalho)": "MENT", "Tuberculose": "TUBE", "Varicela": "VARC", "Violência doméstica/sexual": "VIOL", "Zika Vírus": "ZIKA"}
+            mapa_doencas = {"Acidente de trabalho": "ACGR", "Acidente de trabalho com material biológico": "ACBI", "AIDS em adultos": "AIDA", "AIDS em crianças": "AIDC", "Câncer Relacionado ao Trabalho": "CANC", "Chikungunya": "CHIK", "Dengue": "DENG", "Doença de Chagas": "CHAG", "Hepatites Virais": "HEPA", "HIV em adultos": "HIVA", "HIV em crianças": "HIVC", "HIV em crianças expostas": "HIVE", "Leptospirose": "LEPT", "Meningite": "MENI", "Perda Auditiva por Ruído (Trabalho)": "PAIR", "Raiva Humana": "RAIV", "Sífilis Adquirida": "SIFA", "Sífilis Congênita": "SIFC", "Sífilis em Gestante": "SIFG", "Transtornos Mentais (Trabalho)": "MENT", "Tuberculose": "TUBE", "Varicela": "VARC", "Violência doméstica/sexual": "VIOL", "Zika Virust": "ZIKA"}
             nome_agravo = st.sidebar.selectbox("Doença/Agravo:", sorted(list(mapa_doencas.keys())))
             agravo_sel = mapa_doencas[nome_agravo]
         elif "SIH" in sistema:
@@ -774,14 +787,18 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                         
                         if nivel_terr == "Município" and "CNES" not in sistema:
                             cols_dict = obter_colunas_territoriais(sistema, sih_grupo_sel)
-                            col_res = next((c for c in df_tratado.columns if c in cols_dict.get("res", [])), None)
-                            col_oco = next((c for c in df_tratado.columns if c in cols_dict.get("oco", [])), None)
+                            # 🌟 BUSCA ROBUSTA EM MAIÚSCULO DAS COLUNAS TERRITORIAIS
+                            cols_res_upper = [x.upper() for x in cols_dict.get("res", [])]
+                            cols_oco_upper = [x.upper() for x in cols_dict.get("oco", [])]
+                            
+                            col_res = next((c for c in df_tratado.columns if c.upper() in cols_res_upper), None)
+                            col_oco = next((c for c in df_tratado.columns if c.upper() in cols_oco_upper), None)
                             
                             if "SIM" in sistema:
-                                txt_oco = "ÓBITOS NA CIDADE"
-                                txt_res = "MORADORES FALECIDOS"
-                                txt_oco_desc = "Ocorreram no município"
-                                txt_res_desc = "Moradores locais"
+                                txt_oco = "ÓBITOS NA CIDADE (OCORRÊNCIA)"
+                                txt_res = "MORADORES FALECIDOS (RESIDÊNCIA)"
+                                txt_oco_desc = "Ocorreram geograficamente no município"
+                                txt_res_desc = "Pessoas que residiam no município"
                             elif "SINASC" in sistema:
                                 txt_oco = "NASCIMENTOS NA CIDADE"
                                 txt_res = "MÃES RESIDENTES"
@@ -811,6 +828,30 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 vol_oco_fora = (mask_oco & ~mask_res).sum()
                                 vol_res_fora = (mask_res & ~mask_oco).sum()
                                 
+                                # 🌟 CÁLCULO E DETALHAMENTO DO TIPOBITO PARA O SIM (Evita furos e clareia dados em branco ou código 9)
+                                desc_oco_extra = ""
+                                desc_res_extra = ""
+                                if "SIM" in sistema:
+                                    col_tipo = next((c for c in df_bruto.columns if c.upper() == "TIPOBITO"), None)
+                                    if col_tipo:
+                                        # Captura e trata os códigos de forma segura
+                                        tipos_serie = df_bruto[col_tipo].astype(str).str.replace(".0", "", regex=False).str.strip().fillna("9")
+                                        tipos_serie = tipos_serie.replace({"nan": "9", "": "9"})
+                                        
+                                        # Quebra para o card de Ocorrência
+                                        tipos_oco = tipos_serie[mask_oco]
+                                        nf_oco = (tipos_oco == "1").sum()
+                                        f_oco = (tipos_oco == "2").sum()
+                                        out_oco = len(tipos_oco) - nf_oco - f_oco
+                                        desc_oco_extra = f"<br><span style='font-size:12.5px; color:#444; font-weight:bold;'>Subtotais -> Não Fetal: {nf_oco} | Fetal: {f_oco} | Outros/Ign: {out_oco}</span>"
+                                        
+                                        # Quebra para o card de Residência
+                                        tipos_res = tipos_serie[mask_res]
+                                        nf_res = (tipos_res == "1").sum()
+                                        f_res = (tipos_res == "2").sum()
+                                        out_res = len(tipos_res) - nf_res - f_res
+                                        desc_res_extra = f"<br><span style='font-size:12.5px; color:#444; font-weight:bold;'>Subtotais -> Não Fetal: {nf_res} | Fetal: {f_res} | Outros/Ign: {out_res}</span>"
+
                                 def classificar_relacao(row):
                                     r = str(row[col_res]).startswith(id_datasus_alvo[:6])
                                     o = str(row[col_oco]).startswith(id_datasus_alvo[:6])
@@ -836,9 +877,10 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     c3.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>🏠 {txt_res}</h4><h2 style="color:#28a745; margin:0;">{vol_res:,}</h2><p>{txt_res_desc}</p></div>', unsafe_allow_html=True)
                                     c4.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>💰 CUSTO RESIDÊNCIA</h4><h2 style="color:#28a745; margin:0;">{f_br(custo_res)}</h2><p>Gasto com Moradores</p></div>', unsafe_allow_html=True)
                                 else:
+                                    # EXIBIÇÃO CLARA DOS 2 CARDS IGUAL AOS OUTROS SISTEMAS (SIM, SINASC, SINAN)
                                     c1, c2 = st.columns(2)
-                                    c1.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 {txt_oco}</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2><p>{txt_oco_desc}</p></div>', unsafe_allow_html=True)
-                                    c2.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>🏠 {txt_res}</h4><h2 style="color:#28a745; margin:0;">{vol_res:,}</h2><p>{txt_res_desc}</p></div>', unsafe_allow_html=True)
+                                    c1.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 {txt_oco}</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2><p>{txt_oco_desc}{desc_oco_extra}</p></div>', unsafe_allow_html=True)
+                                    c2.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>🏠 {txt_res}</h4><h2 style="color:#28a745; margin:0;">{vol_res:,}</h2><p>{txt_res_desc}{desc_res_extra}</p></div>', unsafe_allow_html=True)
                                 
                                 st.markdown("---")
                                 st.markdown("### 🗺️ Raio-X do Fluxo Geográfico (Migração de Pacientes/Eventos)")
@@ -869,7 +911,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 st.warning("⚠️ **Aviso Técnico:** Este arquivo do Governo (neste grupo/ano) não informou a residência, apenas o local do Hospital/Ocorrência. O mapa de migração foi desabilitado para esta extração.")
                                 mask_oco = df_tratado[col_oco].apply(normalizar_codigo).astype(str).str.startswith(id_datasus_alvo[:6])
                                 vol_oco = mask_oco.sum()
-                                st.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 {txt_oco}</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2><p>Ocorrência / Produção Local</p></div>', unsafe_allow_html=True)
+                                st.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 {txt_oco}</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2><p>Ocorrência / Production Local</p></div>', unsafe_allow_html=True)
                             else:
                                 st.markdown(f'<div class="metric-card"><h2>{len(df_bruto)} Registros Processados</h2><p>{sistema_titulo} - {nome_local} ({periodo_label})</p></div>', unsafe_allow_html=True)
 
@@ -902,7 +944,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             else:
                                 df_dash = df_tratado.copy()
                                 
-                                # 🌟 FOCO AUTOMÁTICO DO DASHBOARD (Sem bolinhas interativas)
                                 if nivel_terr == "Município" and "CNES" not in sistema and col_res and col_oco:
                                     if "SIH" in sistema:
                                         st.info("🏥 **Lente Hospitalar/Ocorrência:** Os perfis clínicos e de custos abaixo focam nos **ATENDIDOS NA CIDADE** (produção local).")
@@ -1004,17 +1045,17 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     with c1:
                                         if "Faixa Etária" in df_dash.columns: st.bar_chart(df_dash["Faixa Etária"].value_counts().sort_index())
                                     with c2:
-                                        col_sexo = next((c for c in df_dash.columns if "Sexo" in c), None)
+                                        col_sexo = next((c if "SEXO" in c.upper() else None) for c in df_dash.columns)
                                         if col_sexo: st.bar_chart(df_dash[col_sexo].value_counts())
                                     with c3:
-                                        col_raca = next((c for c in df_dash.columns if "Raça" in c), None)
+                                        col_raca = next((c for c in df_dash.columns if "RAÇA" in c.upper() or "RACACOR" in c.upper()), None)
                                         if col_raca: st.bar_chart(df_dash[col_raca].value_counts())
                                     
                                     st.write("---")
                                     c_a, c_b = st.columns(2)
                                     with c_a:
                                         st.write("### Causa Básica do Óbito")
-                                        col_doenca = next((c for c in df_dash.columns if "Causa Básica (CID-10)" in c), None)
+                                        col_doenca = next((c for c in df_dash.columns if "CAUSA BÁSICA" in c.upper() or "CAUSABAS" in c.upper()), None)
                                         if col_doenca: st.bar_chart(df_dash[col_doenca].value_counts().head(10))
                                     with c_b:
                                         if "Local de Ocorrência" in df_dash.columns: 
