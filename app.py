@@ -57,9 +57,9 @@ def obter_colunas_territoriais(sistema, grupo=None):
             return {"res": ["SP_MUNRES", "MUNIC_RES", "MUN_RES"], "oco": ["SP_MUNIC", "SP_MUNMOV", "MUNIC_MOV", "GESTOR_COD"]}
         return {"res": ["MUNIC_RES"], "oco": ["MUNIC_MOV", "GESTOR_COD"]}
     if "SIM" in sistema:
-        # PRIORIDADE: CODMUNOCOR (ocorrência corrigida) em primeiro lugar
+        # PRIORIDADE: CODMUNOCO (ocorrência original) para bater com o Tabwin
         return {"res": ["CODMUNRES", "Município Residência", "MUNICÍPIO RESIDÊNCIA"],
-                "oco": ["CODMUNOCOR", "CODMUNOCO", "Município Ocorrência", "MUNICÍPIO OCORRÊNCIA"]}
+                "oco": ["CODMUNOCO", "CODMUNOCOR", "Município Ocorrência", "MUNICÍPIO OCORRÊNCIA"]}
     if "SINASC" in sistema:
         return {"res": ["CODMUNRES"], "oco": ["CODMUNNASC", "CODMUNESTAB", "COMUNESTAB"]}
     if "SINAN" in sistema:
