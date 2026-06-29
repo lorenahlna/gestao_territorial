@@ -51,17 +51,18 @@ def listar_anos_disponiveis(sistema="GERAL"):
     ano_inicial, ano_final = limites.get(sistema, (1995, ano_atual - 1))
     return list(range(ano_final, ano_inicial - 1, -1))
 
-# 🌟 RADAR EXPANDIDO DE COLUNAS TERRITORIAIS (BLINDADO)
+# 🌟 RADAR EXPANDIDO DE COLUNAS TERRITORIAIS (BLINDADO E CORRIGIDO)
 def obter_colunas_territoriais(sistema, grupo=None):
     if "SIH" in sistema:
         if grupo == "SP": return {"res": ["SP_MUNRES", "MUNIC_RES", "MUN_RES"], "oco": ["SP_MUNIC", "SP_MUNMOV", "SP_GESTOR", "MUNIC_MOV", "GESTOR_COD"]}
         return {"res": ["MUNIC_RES"], "oco": ["MUNIC_MOV", "GESTOR_COD"]}
-    # ALTERAÇÃO: adicionado CODMUNNAT (naturalidade) como residência
+    
+    # CORREÇÃO SIM: Mantido estritamente o cruzamento oficial do TabNet (removido Cartório e Naturalidade)
     if "SIM" in sistema:
-        return {"res": ["CODMUNRES", "MUNIC_RES", "CODMUNNAT"], "oco": ["CODMUNOCOR", "CODMUNCART", "MUNIC_OCO", "MUNIC_MOV"]}
+        return {"res": ["CODMUNRES"], "oco": ["CODMUNOCOR"]}
+        
     if "SINASC" in sistema:
-        return {"res": ["CODMUNRES", "MUNIC_RES"], "oco": ["CODMUNNASC", "CODMUNESTAB", "COMUNESTAB", "MUNIC_MOV"]}
-    # ALTERAÇÃO: removido ID_UNIDADE (código CNES) – agora só ID_MUNICIP
+        return {"res": ["CODMUNRES"], "oco": ["CODMUNNASC"]}
     if "SINAN" in sistema:
         return {"res": ["ID_MN_RESI"], "oco": ["ID_MUNICIP"]}
     if "CNES" in sistema:
@@ -117,27 +118,6 @@ except ImportError:
 UFS = ["AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS","MG","PA","PB","PR","PE","PI","RJ","RN","RS","RO","RR","SC","SP","SE","TO"]
 ESTADOS_IBGE = {"AC": "12", "AL": "27", "AP": "16", "AM": "13", "BA": "29", "CE": "23", "DF": "53", "ES": "32", "GO": "52", "MA": "21", "MT": "51", "MS": "50", "MG": "31", "PA": "15", "PB": "25", "PR": "41", "PE": "26", "PI": "22", "RJ": "33", "RN": "24", "RS": "43", "RO": "11", "RR": "14", "SC": "42", "SP": "35", "SE": "28", "TO": "17"}
 
-# ---------- MAPA GLOBAL DE MUNICÍPIOS (BRASIL) ----------
-@st.cache_data(show_spinner=False)
-def carregar_municipios_brasil():
-    url = "https://servicodados.ibge.gov.br/api/v1/localidades/municipios"
-    try:
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        mapa = {}
-        for mun in data:
-            codigo = str(mun['id'])[:6]
-            nome = mun['nome']
-            mapa[codigo] = nome
-        return mapa
-    except Exception as e:
-        st.warning(f"Não foi possível carregar a lista completa de municípios: {e}. Usando fallback.")
-        return {"310620": "Belo Horizonte", "310110": "Aimorés", "355030": "São Paulo"}
-
-MAPA_MUNICIPIOS_BRASIL = carregar_municipios_brasil()
-
-# Função para buscar municípios de uma UF (usada no seletor)
 @st.cache_data
 def buscar_municipios_por_uf(uf_sigla):
     url = f"https://servicodados.ibge.gov.br/api/v1/localidades/estados/{uf_sigla}/municipios"
@@ -222,7 +202,7 @@ def decodificar_tp_unid(codigo):
         "71": "Centro de Apoio à Saúde da Família", "72": "Unidade de Atenção à Saúde Indígena",
         "73": "Pronto Atendimento", "74": "Polo Academia da Saúde", "75": "Telessaúde",
         "76": "Central de Regulação Médica das Urgências", "77": "Serviço de Atenção Domiciliar Isolado — Home Care",
-        "78": "Unidade de Atenção em Regime Residencial", "79": "Oficina Ortopédica",
+        "78": "Unidade de Atenção em Regime Residential", "79": "Oficina Ortopédica",
         "80": "Laboratório de Saúde Pública", "81": "Central de Regulação do Acesso",
         "82": "Central de Notificação, Captação e Distribuição de Órgãos Estadual",
         "83": "Polo de Prevenção de Doenças e Agravos e Promoção da Saúde",
@@ -267,7 +247,12 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
         
         if sistema not in ["Internações (SIH)", "Cadastro Nacional de Estabelecimentos (CNES)"]:
             if mes_num is not None and dt_col_real:
-                s = (df_t[dt_col_real].astype(str).str.replace(r"\.0$", "", regex=True).str.replace("-", "", regex=False).str.strip())
+                # 🛠️ CONVERSÃO DE DATAS INTEIRAS COM ZFILL (Ex: "5082024" -> "05082024")
+                s = (df_t[dt_col_real].astype(str)
+                     .str.replace(r"\.0$", "", regex=True)
+                     .str.replace("-", "", regex=False)
+                     .str.strip()
+                     .str.zfill(8))
                 mes_aaaammdd = pd.to_datetime(s, format="%Y%m%d", errors="coerce").dt.month
                 mes_ddmmaaaa = pd.to_datetime(s, format="%d%m%Y", errors="coerce").dt.month
                 meses_extraidos = mes_aaaammdd.fillna(mes_ddmmaaaa)
@@ -367,7 +352,6 @@ def normalizar_lista_arquivos_pysus(res):
     if hasattr(res, "path"): return [str(res.path)]
     return [str(res)]
 
-# 🌟 SIH-SP: LOGICA RESTAURADA DO CODIGO ESTÁVEL V20
 def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
     if isinstance(arquivos, pd.DataFrame): return arquivos
     ano2 = str(ano)[-2:]
@@ -542,7 +526,7 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                     df_temp = aplicar_filtros_imediato(arquivos_norm, sistema, nivel_terr, uf, id_filtro, m, cols_alvo_dict, dt_alvos, grupo=sih_grupo)
                 else:
                     arquivos_norm = filtrar_arquivos_sih_exatos(arquivos_norm, uf, ano, m, sih_grupo)
-                    df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
+                    df_temp, archivos_lidos = processar_retorno_pysus_duckdb(
                         arquivos_norm, cols_alvo_dict, id_filtro, sistema, nivel_terr, uf, m, dt_alvos, tipo_resultado, prefixo_esperado=prefixo_token
                     )
                 
@@ -577,45 +561,29 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                     else: falhas.append(f"{sistema} FALHA DE DOWNLOAD OU ARQUIVO INEXISTENTE | {uf} {ano}")
             continue
 
-        # --- Para SIM, SINASC, SINAN (com fallback sigla/código) ---
         df_temp = pd.DataFrame()
         arquivos_lidos = 0
         try:
-            if "SIM" in sistema:
-                try:
-                    res = api_sim(state=uf, year=ano)
-                except Exception:
-                    uf_code = ESTADOS_IBGE.get(uf, uf)
-                    res = api_sim(state=uf_code, year=ano)
-                df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
-                    res, cols_alvo_dict, id_filtro, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado
-                )
-            elif "SINASC" in sistema:
-                try:
-                    res = api_sinasc(state=uf, year=ano)
-                except Exception:
-                    uf_code = ESTADOS_IBGE.get(uf, uf)
-                    res = api_sinasc(state=uf_code, year=ano)
-                df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
-                    res, cols_alvo_dict, id_filtro, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado
-                )
+            if "SIM" in sistema: 
+                res = api_sim(state=uf, year=ano)
+            elif "SINASC" in sistema: 
+                res = api_sinasc(state=uf, year=ano)
             elif "SINAN" in sistema:
                 try:
                     from pysus.online_data.SINAN import download as download_sinan
-                    try:
-                        res = download_sinan(disease=agravo, years=[ano], states=[uf])
-                    except Exception:
-                        uf_code = ESTADOS_IBGE.get(uf, uf)
-                        res = download_sinan(disease=agravo, years=[ano], states=[uf_code])
-                except Exception:
-                    try:
-                        res = api_sinan(disease=agravo, state=uf, year=ano)
-                    except Exception:
-                        uf_code = ESTADOS_IBGE.get(uf, uf)
-                        res = api_sinan(disease=agravo, state=uf_code, year=ano)
-                df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
-                    res, cols_alvo_dict, id_filtro, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado
-                )
+                    res = download_sinan(disease=agravo, years=[ano], states=[uf])
+                except:
+                    try: res = api_sinan(disease=agravo, year=ano)
+                    except: res = api_sinan(disease=agravo, state=uf, year=ano)
+            
+            # 🛠️ CORREÇÃO DE SÃO PAULO: Unificação da Normalização para extrair caminhos de listas de objetos complexos do PySUS
+            res_norm = normalizar_lista_arquivos_pysus(res)
+            if isinstance(res_norm, pd.DataFrame):
+                df_temp = aplicar_filtros_imediato(res_norm, sistema, nivel_terr, uf, id_filtro, mes_num, cols_alvo_dict, dt_alvos)
+                arquivos_lidos = 1
+            else:
+                df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res_norm, cols_alvo_dict, id_filtro, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado)
+                
         except Exception as e:
             falhas.append(f"Download Error {sistema} | {uf} {ano}: {e}")
             continue
@@ -625,23 +593,19 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
             if not df_temp.empty:
                 partes_final.append(df_temp)
                 sucessos_download += 1
-            else: 
-                falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO FINAL | {uf} {ano}")
+            else: falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO FINAL | {uf} {ano}")
         else:
-            if arquivos_lidos > 0:
-                falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO TERRITORIAL | {uf} {ano}")
-            else:
-                falhas.append(f"{sistema} FALHA DE DOWNLOAD OU ARQUIVO INEXISTENTE | {uf} {ano}")
+            if arquivos_lidos > 0: falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO TERRITORIAL | {uf} {ano}")
+            else: falhas.append(f"{sistema} FALHA DE DOWNLOAD OU ARQUIVO INEXISTENTE | {uf} {ano}")
         gc.collect()
             
     if not partes_final:
         if any("SEM REGISTROS" in f for f in falhas):
-            return pd.DataFrame({"Erro": [f"A base foi processada, mas não há registros para o território, período ou agravo selecionados. Detalhes: {'; '.join(falhas[:2])}"] })
+            return pd.DataFrame({"Erro": ["A base foi processada, mas não há registros para o território, período ou agravo selecionados. O Datasus pode não ter publicado esses dados ainda."] })
         else:
-            return pd.DataFrame({"Erro": [f"Falha de conexão ou arquivo inexistente no DATASUS para os filtros selecionados. Detalhes: {'; '.join(falhas[:2])}"] })
+            return pd.DataFrame({"Erro": ["Falha de conexão ou arquivo inexistente no DATASUS para os filtros selecionados."] })
     return pd.concat(partes_final, ignore_index=True)
 
-# 🌟 TRATAMENTO DE VARIAVEIS (CBO, CID, IDADE, BAIRRO)
 def tratar_e_traduzir_df(df, sistema):
     df_tratado = df.copy()
     df_tratado.columns = [str(c).upper().strip() for c in df_tratado.columns]
@@ -681,7 +645,6 @@ def tratar_e_traduzir_df(df, sistema):
     if "FANTASIA" in df_tratado.columns: df_tratado["Nome Unidade"] = df_tratado["FANTASIA"]
     if "NO_FANTASIA" in df_tratado.columns: df_tratado["Nome Unidade"] = df_tratado["NO_FANTASIA"]
     
-    # 🌟 NOVO CNES: Identificação precisa do SUS e dos Tipos de Estabelecimento
     col_sus = next((c for c in df_tratado.columns if c in ["VINC_SUS", "ATENDE_SUS", "CONVENIO_SUS"]), None)
     if col_sus: 
         df_tratado["Atende SUS?"] = df_tratado[col_sus].astype(str).str.replace('.0','', regex=False).map({"1": "Sim", "0": "Não", "S": "Sim", "N": "Não"}).fillna("Não Informado")
@@ -689,7 +652,6 @@ def tratar_e_traduzir_df(df, sistema):
     if "TP_UNID" in df_tratado.columns:
         df_tratado["Tipo de Estabelecimento"] = df_tratado["TP_UNID"].apply(decodificar_tp_unid)
 
-    # 🌟 SIM: Recriação dos Dicionários de Óbito
     dic_circ = {"1": "Acidente", "2": "Suicídio", "3": "Homicídio", "4": "Outros", "9": "Ignorado"}
     col_circ = next((c for c in df_tratado.columns if c in ["CIRCOBITO"]), None)
     if col_circ:
@@ -745,8 +707,8 @@ if aba_ativa == "📋 Guia Principal (Extração)":
 
     uf_sel = st.sidebar.selectbox("Selecione o Estado:", ufs_ordenadas, index=ufs_ordenadas.index("MG"))
     muns_estado = buscar_municipios_por_uf(uf_sel)
-    mapa_ibge_local = {dados['id6']: nome for nome, dados in muns_estado.items()}
-    for nome, dados in muns_estado.items(): mapa_ibge_local[dados['id7']] = nome
+    mapa_ibge = {dados['id6']: nome for nome, dados in muns_estado.items()}
+    for nome, dados in muns_estado.items(): mapa_ibge[dados['id7']] = nome
 
     if nivel_terr == "Estado":
         ufs_selecionadas = [uf_sel]; id_ibge_alvo = ESTADOS_IBGE[uf_sel]; nome_local = uf_sel
@@ -826,7 +788,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             df_tratado = tratar_e_traduzir_df(df_bruto, sistema)
                             sistema_titulo = f"SINAN ({nome_agravo})" if "SINAN" in sistema else f"SIH ({sih_grupo_sel})" if "SIH" in sistema else f"CNES ({cnes_grupo_sel})" if "CNES" in sistema else sistema.split(" (")[0]
                         
-                        # DEFINE periodo_label ANTES de qualquer uso
                         periodo_label = f"{mes_sel:02d}/{ano_sel}" if mes_sel else f"{ano_sel}"
                         
                         if nivel_terr == "Município" and "CNES" not in sistema:
@@ -834,37 +795,34 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             sigla_sistema = "SIM" if "SIM" in sistema else "SINASC" if "SINASC" in sistema else "SIH" if "SIH" in sistema else "SINAN"
                             cab_sistema = CONFIG_APP.get("TRADUCAO_CABECALHOS", {}).get(sigla_sistema, {})
                             
-                            # -- Lista de colunas candidatas (originais + traduzidas) --
                             cols_res_candidatas = set(cols_dict.get("res", []))
                             cols_oco_candidatas = set(cols_dict.get("oco", []))
+
                             for orig in list(cols_res_candidatas):
                                 if orig in cab_sistema:
                                     cols_res_candidatas.add(cab_sistema[orig])
                             for orig in list(cols_oco_candidatas):
                                 if orig in cab_sistema:
                                     cols_oco_candidatas.add(cab_sistema[orig])
-                            
+
                             cols_res_existentes = [c for c in cols_res_candidatas if c in df_tratado.columns]
                             cols_oco_existentes = [c for c in cols_oco_candidatas if c in df_tratado.columns]
-                            
-                            # Máscara de residência
+
                             mask_res = pd.Series([False] * len(df_tratado), index=df_tratado.index)
                             for col in cols_res_existentes:
                                 mask_res |= df_tratado[col].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])
-                            
-                            # Máscara de ocorrência (explícita + fallback)
+
                             mask_oco = pd.Series([False] * len(df_tratado), index=df_tratado.index)
                             for col in cols_oco_existentes:
                                 mask_oco |= df_tratado[col].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])
+
+                            if "SIM" not in sistema:
+                                mask_oco_fallback = pd.Series([False] * len(df_tratado), index=df_tratado.index)
+                                for col_oco in cols_oco_existentes:
+                                    vazia = df_tratado[col_oco].isna() | (df_tratado[col_oco].astype(str).str.strip() == "")
+                                    mask_oco_fallback |= (vazia & mask_res)
+                                mask_oco = mask_oco | mask_oco_fallback
                             
-                            # Fallback: se ocorrência vazia e residência bate, considerar como ocorrência
-                            mask_oco_fallback = pd.Series([False] * len(df_tratado), index=df_tratado.index)
-                            for col_oco in cols_oco_existentes:
-                                vazia = df_tratado[col_oco].isna() | (df_tratado[col_oco].astype(str).str.strip() == "")
-                                mask_oco_fallback |= (vazia & mask_res)
-                            mask_oco = mask_oco | mask_oco_fallback
-                            
-                            # Textos para os cards
                             if "SIM" in sistema:
                                 txt_oco = "ÓBITOS NA CIDADE"
                                 txt_res = "MORADORES FALECIDOS"
@@ -934,7 +892,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     st.write(f"- 🚑 **{vol_oco_fora}** vieram/são de fora. **De onde eles vieram?**")
                                     if vol_oco_fora > 0:
                                         df_in = df_tratado[mask_oco & ~mask_res].copy()
-                                        df_in['Origem'] = df_in[col_res_principal].astype(str).str[:6].map(MAPA_MUNICIPIOS_BRASIL).fillna("Outro Estado / Desconhecido")
+                                        df_in['Origem'] = df_in[col_res_principal].astype(str).str[:6].map(mapa_ibge).fillna("Outro Estado / Desconhecido")
                                         st.bar_chart(df_in['Origem'].value_counts().head(10), color="#007bff")
                                     else:
                                         st.info("Nenhuma ocorrência de pessoa de fora registrada na cidade.")
@@ -945,7 +903,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     st.write(f"- 🚑 **{vol_res_fora}** viajaram/ocorreram fora. **Para onde eles foram?**")
                                     if vol_res_fora > 0:
                                         df_out = df_tratado[mask_res & ~mask_oco].copy()
-                                        df_out['Destino'] = df_out[col_oco_principal].astype(str).str[:6].map(MAPA_MUNICIPIOS_BRASIL).fillna("Outro Estado / Desconhecido")
+                                        df_out['Destino'] = df_out[col_oco_principal].astype(str).str[:6].map(mapa_ibge).fillna("Outro Estado / Desconhecido")
                                         st.bar_chart(df_out['Destino'].value_counts().head(10), color="#28a745")
                                     else:
                                         st.info("Nenhum morador precisou sair da cidade (Não há evasão).")
@@ -976,7 +934,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                         
                         tab1, tab2, tab3 = st.tabs(["✅ Planilha Tratada", "⚙️ Planilha Bruta", "📈 Painel de Hospitais e Clínicas" if "CNES" in sistema else "📈 Painel Analítico"])
                         
-                        # 🌟 VISUALIZAÇÃO COM SCROLL INFINITO (SEM CORTES)
                         with tab1:
                             st.dataframe(df_tratado, width="stretch")
                             st.download_button("📥 Baixar Tabela TRATADA Completa (CSV)", df_tratado.to_csv(index=False, sep=';', decimal=','), f"tratado_{sistema_titulo}_{nome_local}.csv", "text/csv")
@@ -990,7 +947,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             else:
                                 df_dash = df_tratado.copy()
                                 
-                                # 🌟 FOCO AUTOMÁTICO DO DASHBOARD (Sem bolinhas interativas)
                                 if nivel_terr == "Município" and "CNES" not in sistema:
                                     if "SIH" in sistema:
                                         if cols_oco_existentes:
