@@ -56,12 +56,12 @@ def obter_colunas_territoriais(sistema, grupo=None):
     if "SIH" in sistema:
         if grupo == "SP": return {"res": ["SP_MUNRES", "MUNIC_RES", "MUN_RES"], "oco": ["SP_MUNIC", "SP_MUNMOV", "SP_GESTOR", "MUNIC_MOV", "GESTOR_COD"]}
         return {"res": ["MUNIC_RES"], "oco": ["MUNIC_MOV", "GESTOR_COD"]}
-    # ALTERAÇÃO PARA SIM (MORTALIDADE) - ADICIONADO CODMUNNAT COMO RESIDÊNCIA (proxy)
+    # ALTERAÇÃO PARA SIM (MORTALIDADE) - MAPEAMENTO COMPLETO DE ACORDO COM AS DIRETRIZES DO BANCO
     if "SIM" in sistema:
-        return {"res": ["CODMUNRES", "MUNIC_RES", "CODMUNNAT"], "oco": ["CODMUNOCOR", "CODMUNCART", "MUNIC_OCO", "MUNIC_MOV"]}
+        return {"res": ["CODMUNRES", "MUNIC_RES", "CODMUNNAT"], "oco": ["CODMUNOCO", "CODMUNOCOR", "CODMUNCART", "MUNIC_OCO", "MUNIC_MOV"]}
     if "SINASC" in sistema:
         return {"res": ["CODMUNRES", "MUNIC_RES"], "oco": ["CODMUNNASC", "CODMUNESTAB", "COMUNESTAB", "MUNIC_MOV"]}
-    # ALTERAÇÃO PARA SINAN (NOTIFICAÇÕES) - REMOVIDO ID_UNIDADE (CNES)
+    # ALTERAÇÃO PARA SINAN (NOTIFICAÇÕES) - UTILIZANDO STRICT ID_MUNICIP PARA MUNICIPIO DE OCORRENCIA
     if "SINAN" in sistema:
         return {"res": ["ID_MN_RESI"], "oco": ["ID_MUNICIP"]}
     if "CNES" in sistema:
@@ -210,11 +210,17 @@ def decodificar_tp_unid(codigo):
     cod_str = str(codigo).strip().zfill(2)
     return dic_unid.get(cod_str, f"{cod_str} - Ignorado/Outros")
 
-def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo_dict, dt_alvos, grupo=None):
+def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo_dict, dt_alvos, group=None):
     try:
         df_t = df_t.copy()
         df_t.columns = [str(c).upper().strip() for c in df_t.columns]
         
+        # FILTRO ROBUSTO PARA ASSEGURAR TIPOBITO IN (1, 2) NO PANDAS
+        if "SIM" in sistema and "TIPOBITO" in df_t.columns:
+            df_t["TIPOBITO_STR"] = df_t["TIPOBITO"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
+            df_t = df_t[df_t["TIPOBITO_STR"].isin(["1", "2"]) | df_t["TIPOBITO_STR"].isna() | (df_t["TIPOBITO_STR"] == "NAN")].copy()
+            df_t = df_t.drop(columns=["TIPOBITO_STR"])
+
         cols_res = [x.upper() for x in cols_alvo_dict.get("res", [])]
         cols_oco = [x.upper() for x in cols_alvo_dict.get("oco", [])]
         
@@ -223,7 +229,7 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
         dt_col_real = next((c for c in df_t.columns if c in dt_alvos), None)
         
         if nivel_terr == "Município" and not col_filtro_res and not col_filtro_oco:
-            if grupo == "ER" or "ER" in sistema: return df_t
+            if group == "ER" or "ER" in sistema: return df_t
             return pd.DataFrame() 
 
         if "SINAN" in sistema and nivel_terr in ["Estado", "Município"]:
@@ -364,7 +370,7 @@ def filtrar_arquivos_sih_exatos(arquivos, uf, ano, mes, grupo):
             if nome.startswith(prefixo_exato) or (grupo.upper() in nome and uf.upper() in nome):
                 selecionados.append(caminho)
                 
-    if not selecionados and arquivos:
+    if not selecionados and archivos:
         return arquivos
     return selecionados
 
@@ -373,7 +379,7 @@ def processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_alvo, sistema, nivel_
     try:
         if isinstance(res, pd.DataFrame):
             arquivos_lidos = 1
-            return aplicar_filtros_imediato(res, sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo_dict, dt_alvos, grupo=prefixo_esperado[:2] if prefixo_esperado else None), arquivos_lidos
+            return aplicar_filtros_imediato(res, sistema, nivel_terr, uf, id_alvo, mes_num, cols_alvo_dict, dt_alvos, group=prefixo_esperado[:2] if prefixo_esperado else None), arquivos_lidos
 
         if isinstance(res, str): res = [res]
         if isinstance(res, list) and len(res) > 0:
@@ -402,6 +408,7 @@ def processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_alvo, sistema, nivel_
 
                 try:
                     cols_parquet = duckdb.query(f"DESCRIBE SELECT * FROM read_parquet('{caminho_sql}')").df()["column_name"].tolist()
+                    cols_upper = [c.upper() for c in cols_parquet]
                     cols_res = [x.upper() for x in cols_alvo_dict.get("res", [])]
                     cols_oco = [x.upper() for x in cols_alvo_dict.get("oco", [])]
                     
@@ -416,7 +423,12 @@ def processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_alvo, sistema, nivel_
                         
                         if where_clauses:
                             where_str = " OR ".join(where_clauses)
-                            query = f"SELECT * FROM read_parquet('{caminho_sql}') WHERE {where_str}"
+                            # EXIGÊNCIA DE ENGENHARIA: REGRAS DO SIM COM INCLUSÃO DE ÓBITOS FETAIS (TIPOBITO 1 E 2)
+                            if "SIM" in sistema and "TIPOBITO" in cols_upper:
+                                col_tb = cols_parquet[cols_upper.index("TIPOBITO")]
+                                query = f"SELECT * FROM read_parquet('{caminho_sql}') WHERE ({where_str}) AND (CAST(\"{col_tb}\" AS VARCHAR) IN ('1', '2') OR \"{col_tb}\" IS NULL)"
+                            else:
+                                query = f"SELECT * FROM read_parquet('{caminho_sql}') WHERE {where_str}"
                             df = duckdb.query(query).df()
                             frames.append(df)
                         elif prefixo_esperado and "ER" in prefixo_esperado:
@@ -442,6 +454,9 @@ def processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_alvo, sistema, nivel_
                         col_estado = col_filtro_oco or col_filtro_res
                         if "SINAN" in sistema and nivel_terr == "Estado" and col_estado and codigo_uf:
                             query = f"SELECT * FROM read_parquet('{caminho_sql}') WHERE CAST(\"{col_estado}\" AS VARCHAR) LIKE '{codigo_uf}%' LIMIT 150000"
+                        elif "SIM" in sistema and "TIPOBITO" in cols_upper:
+                            col_tb = cols_parquet[cols_upper.index("TIPOBITO")]
+                            query = f"SELECT * FROM read_parquet('{caminho_sql}') WHERE CAST(\"{col_tb}\" AS VARCHAR) IN ('1', '2') OR \"{col_tb}\" IS NULL"
                         else:
                             query = f"SELECT * FROM read_parquet('{caminho_sql}')" 
                         df = duckdb.query(query).df()
@@ -517,7 +532,7 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
                 arquivos_norm = normalizar_lista_arquivos_pysus(res)
 
                 if isinstance(arquivos_norm, pd.DataFrame):
-                    df_temp = aplicar_filtros_imediato(arquivos_norm, sistema, nivel_terr, uf, id_filtro, m, cols_alvo_dict, dt_alvos, grupo=sih_grupo)
+                    df_temp = aplicar_filtros_imediato(arquivos_norm, sistema, nivel_terr, uf, id_filtro, m, cols_alvo_dict, dt_alvos, group=sih_grupo)
                 else:
                     arquivos_norm = filtrar_arquivos_sih_exatos(arquivos_norm, uf, ano, m, sih_grupo)
                     df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(
@@ -558,9 +573,25 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
         df_temp = pd.DataFrame()
         arquivos_lidos = 0
         try:
+            # MODELO CORRIGIDO PARA O SIM: CAPTURA DO + DOFET DE FORMA COMBINADA
             if "SIM" in sistema: 
-                res = api_sim(state=uf, year=ano)
-                df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_filtro, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado)
+                res_arquivos = []
+                for g in ["DO", "DOFET"]:
+                    try:
+                        r = api_sim(state=uf, year=ano, group=g)
+                        if r is not None:
+                            if isinstance(r, list): res_arquivos.extend(r)
+                            else: res_arquivos.append(r)
+                    except: pass
+                if not res_arquivos:
+                    try:
+                        r = api_sim(state=uf, year=ano)
+                        if r is not None:
+                            if isinstance(r, list): res_arquivos.extend(r)
+                            else: res_arquivos.append(r)
+                    except: res_arquivos = None
+                
+                df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res_arquivos if res_arquivos else None, cols_alvo_dict, id_filtro, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado)
             elif "SINASC" in sistema: 
                 res = api_sinasc(state=uf, year=ano)
                 df_temp, arquivos_lidos = processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_filtro, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado)
@@ -778,18 +809,14 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                         
                         periodo_label = f"{mes_sel:02d}/{ano_sel}" if mes_sel else f"{ano_sel}"
                         
-                        # ********** CORREÇÃO AQUI **********
                         if nivel_terr == "Município" and "CNES" not in sistema:
                             cols_dict = obter_colunas_territoriais(sistema, sih_grupo_sel)
-                            # Obter dicionário de cabeçalhos para o sistema (para considerar nomes traduzidos)
                             sigla_sistema = "SIM" if "SIM" in sistema else "SINASC" if "SINASC" in sistema else "SIH" if "SIH" in sistema else "SINAN"
                             cab_sistema = CONFIG_APP.get("TRADUCAO_CABECALHOS", {}).get(sigla_sistema, {})
                             
-                            # --- Lista de colunas de residência e ocorrência (originais + traduzidas) ---
                             cols_res_candidatas = set(cols_dict.get("res", []))
                             cols_oco_candidatas = set(cols_dict.get("oco", []))
 
-                            # Adicionar nomes traduzidos, se existirem
                             for orig in list(cols_res_candidatas):
                                 if orig in cab_sistema:
                                     cols_res_candidatas.add(cab_sistema[orig])
@@ -797,32 +824,23 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 if orig in cab_sistema:
                                     cols_oco_candidatas.add(cab_sistema[orig])
 
-                            # Encontrar quais colunas realmente existem no DataFrame
                             cols_res_existentes = [c for c in cols_res_candidatas if c in df_tratado.columns]
                             cols_oco_existentes = [c for c in cols_oco_candidatas if c in df_tratado.columns]
 
-                            # --- MÁSCARA DE RESIDÊNCIA (qualquer coluna de residência) ---
                             mask_res = pd.Series([False] * len(df_tratado), index=df_tratado.index)
                             for col in cols_res_existentes:
                                 mask_res |= df_tratado[col].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])
 
-                            # --- MÁSCARA DE OCORRÊNCIA (qualquer coluna de ocorrência + fallback para residência) ---
                             mask_oco = pd.Series([False] * len(df_tratado), index=df_tratado.index)
                             for col in cols_oco_existentes:
                                 mask_oco |= df_tratado[col].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])
 
-                            # --- FALLBACK: se ocorrência estiver VAZIA (ou NaN) e residência bater, considerar como ocorrência ---
-                            # (isso iguala ao comportamento do TabNet)
                             mask_oco_fallback = pd.Series([False] * len(df_tratado), index=df_tratado.index)
                             for col_oco in cols_oco_existentes:
-                                # Verifica se a coluna de ocorrência está vazia
                                 vazia = df_tratado[col_oco].isna() | (df_tratado[col_oco].astype(str).str.strip() == "")
-                                # E a residência bate
                                 mask_oco_fallback |= (vazia & mask_res)
 
-                            # Combina a ocorrência explícita com o fallback
                             mask_oco = mask_oco | mask_oco_fallback
-                            # ********** FIM DA CORREÇÃO **********
                             
                             if "SIM" in sistema:
                                 txt_oco = "ÓBITOS NA CIDADE"
@@ -852,7 +870,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 vol_oco_fora = (mask_oco & ~mask_res).sum()
                                 vol_res_fora = (mask_res & ~mask_oco).sum()
                                 
-                                # Para classificação, usamos a primeira coluna de residência e ocorrência que existe
                                 col_res_principal = cols_res_existentes[0]
                                 col_oco_principal = cols_oco_existentes[0]
                                 
@@ -953,7 +970,6 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     if "SIH" in sistema:
                                         if cols_oco_existentes:
                                             st.info("🏥 **Lente Hospitalar/Ocorrência:** Os perfis clínicos e de custos abaixo focam nos **ATENDIDOS NA CIDADE**, mostrando a real produção dos hospitais locais.")
-                                            # Usa a primeira coluna de ocorrência para filtrar
                                             col_oco_dash = cols_oco_existentes[0]
                                             df_dash = df_tratado[df_tratado[col_oco_dash].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])]
                                     else:
