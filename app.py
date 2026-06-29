@@ -778,10 +778,27 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                         
                         periodo_label = f"{mes_sel:02d}/{ano_sel}" if mes_sel else f"{ano_sel}"
                         
+                        # ********** CORREÇÃO AQUI **********
                         if nivel_terr == "Município" and "CNES" not in sistema:
                             cols_dict = obter_colunas_territoriais(sistema, sih_grupo_sel)
-                            col_res = next((c for c in df_tratado.columns if c in cols_dict.get("res", [])), None)
-                            col_oco = next((c for c in df_tratado.columns if c in cols_dict.get("oco", [])), None)
+                            # Obter dicionário de cabeçalhos para o sistema (para considerar nomes traduzidos)
+                            sigla_sistema = "SIM" if "SIM" in sistema else "SINASC" if "SINASC" in sistema else "SIH" if "SIH" in sistema else "SINAN"
+                            cab_sistema = CONFIG_APP.get("TRADUCAO_CABECALHOS", {}).get(sigla_sistema, {})
+                            
+                            # Função auxiliar para encontrar coluna considerando nomes originais e traduzidos
+                            def encontrar_coluna(candidatos_originais):
+                                candidatos = set(candidatos_originais)
+                                for orig in candidatos_originais:
+                                    if orig in cab_sistema:
+                                        candidatos.add(cab_sistema[orig])
+                                for col in df_tratado.columns:
+                                    if col in candidatos:
+                                        return col
+                                return None
+                            
+                            col_res = encontrar_coluna(cols_dict.get("res", []))
+                            col_oco = encontrar_coluna(cols_dict.get("oco", []))
+                            # ********** FIM DA CORREÇÃO **********
                             
                             if "SIM" in sistema:
                                 txt_oco = "ÓBITOS NA CIDADE"
