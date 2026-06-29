@@ -56,6 +56,7 @@ def obter_colunas_territoriais(sistema, grupo=None):
     if "SIH" in sistema:
         if grupo == "SP": return {"res": ["SP_MUNRES", "MUNIC_RES", "MUN_RES"], "oco": ["SP_MUNIC", "SP_MUNMOV", "SP_GESTOR", "MUNIC_MOV", "GESTOR_COD"]}
         return {"res": ["MUNIC_RES"], "oco": ["MUNIC_MOV", "GESTOR_COD"]}
+    # CORREÇÃO PARA SP/RJ: Inclusão simultânea de CODMUNOCO e CODMUNOCOR para evitar tabelas vazias
     if "SIM" in sistema: return {"res": ["CODMUNRES", "MUNIC_RES"], "oco": ["CODMUNOCO", "CODMUNOCOR", "CODMUNCART", "MUNIC_OCO", "MUNIC_MOV"]}
     if "SINASC" in sistema: return {"res": ["CODMUNRES", "MUNIC_RES"], "oco": ["CODMUNNASC", "CODMUNESTAB", "COMUNESTAB", "MUNIC_MOV"]}
     if "SINAN" in sistema: return {"res": ["ID_MN_RESI"], "oco": ["ID_MUNICIP"]}
@@ -566,12 +567,13 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
         arquivos_lidos = 0
         try:
             if "SIM" in sistema: 
-                # Normalize via normalizar_lista_arquivos_pysus so SP and RJ load smoothly!
+                # Normalize via normalizar_lista_arquivos_pysus so SP and RJ return a proper list of files to process!
                 res_geral = api_sim(state=uf, year=int(ano))
                 arquivos_norm_geral = normalizar_lista_arquivos_pysus(res_geral)
                 df_geral, q_geral = processar_retorno_pysus_duckdb(arquivos_norm_geral, cols_alvo_dict, id_filtro, sistema, nivel_terr, uf, mes_num, dt_alvos, tipo_resultado)
                 arquivos_lidos += q_geral
                 
+                # Fetch Fetal deaths too!
                 df_fetal = pd.DataFrame()
                 try:
                     res_fetal = api_sim(state=uf, year=int(ano), group="DOFET")
@@ -875,6 +877,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     c2.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>💰 CUSTO OCORRÊNCIA</h4><h2 style="color:#007bff; margin:0;">{f_br(custo_oco)}</h2><p>Entrou nos Hospitais</p></div>', unsafe_allow_html=True)
                                     c3.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>🏠 {txt_res}</h4><h2 style="color:#28a745; margin:0;">{vol_res:,}</h2><p>{txt_res_desc}</p></div>', unsafe_allow_html=True)
                                     c4.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>💰 CUSTO RESIDÊNCIA</h4><h2 style="color:#28a745; margin:0;">{f_br(custo_res)}</h2><p>Gasto com Moradores</p></div>', unsafe_allow_html=True)
+                                # 🌟 REESTRUTURAÇÃO DOS CARDS DO SIM: Exibição unificada de 2 Cards (Geral + Fetal) sem quebra de NameError
                                 elif "SIM" in sistema and "TIPOBITO" in df_tratado.columns:
                                     df_tratado["TB_CHECK"] = df_tratado["TIPOBITO"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
                                     oco_geral = (mask_oco & (df_tratado["TB_CHECK"] != "1")).sum()
@@ -956,17 +959,16 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             else:
                                 df_dash = df_tratado.copy()
                                 
+                                # 🌟 CORREÇÃO DO NameError: Substituição de cols_oco_existentes por col_oco/col_res nativos
                                 if nivel_terr == "Município" and "CNES" not in sistema:
                                     if "SIH" in sistema:
-                                        if cols_oco_existentes:
+                                        if col_oco:
                                             st.info("🏥 **Lente Hospitalar/Ocorrência:** Os perfis clínicos e de custos abaixo focam nos **ATENDIDOS NA CIDADE**, mostrando a real produção dos hospitais locais.")
-                                            col_oco_dash = cols_oco_existentes[0]
-                                            df_dash = df_tratado[df_tratado[col_oco_dash].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])]
+                                            df_dash = df_tratado[df_tratado[col_oco].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])]
                                     else:
-                                        if cols_res_existentes:
+                                        if col_res:
                                             st.info("🏠 **Lente Epidemiológica/Residência:** O painel abaixo foca exclusivamente na saúde dos **MORADORES DESTA CIDADE**, para facilitar o planejamento municipal e vacinal.")
-                                            col_res_dash = cols_res_existentes[0]
-                                            df_dash = df_tratado[df_tratado[col_res_dash].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])]
+                                            df_dash = df_tratado[df_tratado[col_res].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])]
                                 
                                 if "CNES" not in sistema:
                                     st.subheader(f"Perfil Demográfico/Clínico: {sistema_titulo}")
