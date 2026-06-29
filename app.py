@@ -785,19 +785,43 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                             sigla_sistema = "SIM" if "SIM" in sistema else "SINASC" if "SINASC" in sistema else "SIH" if "SIH" in sistema else "SINAN"
                             cab_sistema = CONFIG_APP.get("TRADUCAO_CABECALHOS", {}).get(sigla_sistema, {})
                             
-                            # Função auxiliar para encontrar coluna considerando nomes originais e traduzidos
-                            def encontrar_coluna(candidatos_originais):
-                                candidatos = set(candidatos_originais)
-                                for orig in candidatos_originais:
-                                    if orig in cab_sistema:
-                                        candidatos.add(cab_sistema[orig])
-                                for col in df_tratado.columns:
-                                    if col in candidatos:
-                                        return col
-                                return None
-                            
-                            col_res = encontrar_coluna(cols_dict.get("res", []))
-                            col_oco = encontrar_coluna(cols_dict.get("oco", []))
+                            # --- Lista de colunas de residência e ocorrência (originais + traduzidas) ---
+                            cols_res_candidatas = set(cols_dict.get("res", []))
+                            cols_oco_candidatas = set(cols_dict.get("oco", []))
+
+                            # Adicionar nomes traduzidos, se existirem
+                            for orig in list(cols_res_candidatas):
+                                if orig in cab_sistema:
+                                    cols_res_candidatas.add(cab_sistema[orig])
+                            for orig in list(cols_oco_candidatas):
+                                if orig in cab_sistema:
+                                    cols_oco_candidatas.add(cab_sistema[orig])
+
+                            # Encontrar quais colunas realmente existem no DataFrame
+                            cols_res_existentes = [c for c in cols_res_candidatas if c in df_tratado.columns]
+                            cols_oco_existentes = [c for c in cols_oco_candidatas if c in df_tratado.columns]
+
+                            # --- MÁSCARA DE RESIDÊNCIA (qualquer coluna de residência) ---
+                            mask_res = pd.Series([False] * len(df_tratado), index=df_tratado.index)
+                            for col in cols_res_existentes:
+                                mask_res |= df_tratado[col].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])
+
+                            # --- MÁSCARA DE OCORRÊNCIA (qualquer coluna de ocorrência + fallback para residência) ---
+                            mask_oco = pd.Series([False] * len(df_tratado), index=df_tratado.index)
+                            for col in cols_oco_existentes:
+                                mask_oco |= df_tratado[col].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])
+
+                            # --- FALLBACK: se ocorrência estiver VAZIA (ou NaN) e residência bater, considerar como ocorrência ---
+                            # (isso iguala ao comportamento do TabNet)
+                            mask_oco_fallback = pd.Series([False] * len(df_tratado), index=df_tratado.index)
+                            for col_oco in cols_oco_existentes:
+                                # Verifica se a coluna de ocorrência está vazia
+                                vazia = df_tratado[col_oco].isna() | (df_tratado[col_oco].astype(str).str.strip() == "")
+                                # E a residência bate
+                                mask_oco_fallback |= (vazia & mask_res)
+
+                            # Combina a ocorrência explícita com o fallback
+                            mask_oco = mask_oco | mask_oco_fallback
                             # ********** FIM DA CORREÇÃO **********
                             
                             if "SIM" in sistema:
@@ -821,19 +845,20 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 txt_oco_desc = "Hospitais locais"
                                 txt_res_desc = "População local"
                             
-                            if col_oco and col_res:
-                                mask_res = df_tratado[col_res].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])
-                                mask_oco = df_tratado[col_oco].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])
-                                
+                            if cols_oco_existentes and cols_res_existentes:
                                 vol_oco = mask_oco.sum()
                                 vol_res = mask_res.sum()
                                 vol_ambos = (mask_oco & mask_res).sum()
                                 vol_oco_fora = (mask_oco & ~mask_res).sum()
                                 vol_res_fora = (mask_res & ~mask_oco).sum()
                                 
+                                # Para classificação, usamos a primeira coluna de residência e ocorrência que existe
+                                col_res_principal = cols_res_existentes[0]
+                                col_oco_principal = cols_oco_existentes[0]
+                                
                                 def classificar_relacao(row):
-                                    r = str(row[col_res]).startswith(id_datasus_alvo[:6])
-                                    o = str(row[col_oco]).startswith(id_datasus_alvo[:6])
+                                    r = str(row[col_res_principal]).startswith(id_datasus_alvo[:6])
+                                    o = str(row[col_oco_principal]).startswith(id_datasus_alvo[:6])
                                     if r and o: return f"Morador ocorrido em {nome_local}"
                                     if o and not r: return f"Pessoa de fora ocorrida em {nome_local} (Importado)"
                                     if r and not o: return f"Morador de {nome_local} ocorrido em outra cidade (Exportado)"
@@ -869,7 +894,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     st.write(f"- 🚑 **{vol_oco_fora}** vieram/são de fora. **De onde eles vieram?**")
                                     if vol_oco_fora > 0:
                                         df_in = df_tratado[mask_oco & ~mask_res].copy()
-                                        df_in['Origem'] = df_in[col_res].astype(str).str[:6].map(mapa_ibge).fillna("Outro Estado / Desconhecido")
+                                        df_in['Origem'] = df_in[col_res_principal].astype(str).str[:6].map(mapa_ibge).fillna("Outro Estado / Desconhecido")
                                         st.bar_chart(df_in['Origem'].value_counts().head(10), color="#007bff")
                                     else:
                                         st.info("Nenhuma ocorrência de pessoa de fora registrada na cidade.")
@@ -880,14 +905,16 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     st.write(f"- 🚑 **{vol_res_fora}** viajaram/ocorreram fora. **Para onde eles foram?**")
                                     if vol_res_fora > 0:
                                         df_out = df_tratado[mask_res & ~mask_oco].copy()
-                                        df_out['Destino'] = df_out[col_oco].astype(str).str[:6].map(mapa_ibge).fillna("Outro Estado / Desconhecido")
+                                        df_out['Destino'] = df_out[col_oco_principal].astype(str).str[:6].map(mapa_ibge).fillna("Outro Estado / Desconhecido")
                                         st.bar_chart(df_out['Destino'].value_counts().head(10), color="#28a745")
                                     else:
                                         st.info("Nenhum morador precisou sair da cidade (Não há evasão).")
 
-                            elif col_oco and not col_res:
-                                st.warning("⚠️ **Aviso Técnico:** Este arquivo de faturamento do Governo (neste grupo/ano) não informou a residência dos pacientes, apenas o local do Hospital/Ocorrência. O mapa de migração foi desabilitado para esta extração.")
-                                mask_oco = df_tratado[col_oco].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])
+                            elif cols_oco_existentes and not cols_res_existentes:
+                                st.warning("⚠️ **Aviso Técnico:** Este arquivo não informou a residência dos pacientes, apenas o local de ocorrência. O mapa de migração foi desabilitado para esta extração.")
+                                mask_oco = pd.Series([False] * len(df_tratado), index=df_tratado.index)
+                                for col in cols_oco_existentes:
+                                    mask_oco |= df_tratado[col].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])
                                 vol_oco = mask_oco.sum()
                                 st.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 {txt_oco}</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2><p>Ocorrência / Produção Local</p></div>', unsafe_allow_html=True)
                             else:
@@ -924,13 +951,16 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 
                                 if nivel_terr == "Município" and "CNES" not in sistema:
                                     if "SIH" in sistema:
-                                        if col_oco:
+                                        if cols_oco_existentes:
                                             st.info("🏥 **Lente Hospitalar/Ocorrência:** Os perfis clínicos e de custos abaixo focam nos **ATENDIDOS NA CIDADE**, mostrando a real produção dos hospitais locais.")
-                                            df_dash = df_tratado[df_tratado[col_oco].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])]
+                                            # Usa a primeira coluna de ocorrência para filtrar
+                                            col_oco_dash = cols_oco_existentes[0]
+                                            df_dash = df_tratado[df_tratado[col_oco_dash].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])]
                                     else:
-                                        if col_res:
+                                        if cols_res_existentes:
                                             st.info("🏠 **Lente Epidemiológica/Residência:** O painel abaixo foca exclusivamente na saúde dos **MORADORES DESTA CIDADE**, para facilitar o planejamento municipal e vacinal.")
-                                            df_dash = df_tratado[df_tratado[col_res].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])]
+                                            col_res_dash = cols_res_existentes[0]
+                                            df_dash = df_tratado[df_tratado[col_res_dash].fillna("").astype(str).str.startswith(id_datasus_alvo[:6])]
                                 
                                 if "CNES" not in sistema:
                                     st.subheader(f"Perfil Demográfico/Clínico: {sistema_titulo}")
