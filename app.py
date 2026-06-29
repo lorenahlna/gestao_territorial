@@ -1010,22 +1010,13 @@ def aplicar_filtros_imediato(df_t, sistema, nivel_terr, uf, id_datasus_alvo, mes
 
 
 
-def leitura_segura_parquet(caminho, limite=50000):
-
-
-
+def leitura_segura_parquet(caminho, limite=None):
     try:
-
-
-
         caminho_sql = str(caminho).replace("'", "''")
-
-
-
-        query = f"SELECT * FROM read_parquet('{caminho_sql}') LIMIT {limite}"
-
-
-
+        if limite:
+            query = f"SELECT * FROM read_parquet('{caminho_sql}') LIMIT {limite}"
+        else:
+            query = f"SELECT * FROM read_parquet('{caminho_sql}')"
         return duckdb.query(query).df()
 
 
@@ -1718,7 +1709,7 @@ def processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_alvo, sistema, nivel_
 
 
 
-                            frames.append(leitura_segura_parquet(caminho, limite=50000))
+                            frames.append(leitura_segura_parquet(caminho, limite=None))
 
 
 
@@ -1738,7 +1729,7 @@ def processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_alvo, sistema, nivel_
 
 
 
-                            query = f"SELECT * FROM read_parquet('{caminho_sql}') WHERE CAST(\"{col_estado}\" AS VARCHAR) LIKE '{codigo_uf}%' LIMIT 150000"
+                            query = f"SELECT * FROM read_parquet('{caminho_sql}') WHERE CAST(\"{col_estado}\" AS VARCHAR) LIKE '{codigo_uf}%'"
 
 
 
@@ -1762,7 +1753,7 @@ def processar_retorno_pysus_duckdb(res, cols_alvo_dict, id_alvo, sistema, nivel_
 
 
 
-                    frames.append(leitura_segura_parquet(caminho, limite=50000))
+                    frames.append(leitura_segura_parquet(caminho, limite=None))
 
 
 
