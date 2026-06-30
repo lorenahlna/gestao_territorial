@@ -128,6 +128,46 @@ def buscar_municipios_por_uf(uf_sigla):
     except:
         return {"Belo Horizonte": {"id7": "3106200", "id6": "310620", "nome": "Belo Horizonte", "uf": "MG"}}
 
+@st.cache_data(show_spinner=False)
+def buscar_mapa_municipios_brasil():
+    """Mapa nacional COD6 -> Nome/UF para fluxos SIM entre UFs.
+
+    A correção do SIM varre todas as UFs para bater ocorrência com o DATASUS.
+    Sem este mapa nacional, RJ/SP/BH e outras capitais exibem muitos fluxos como
+    'Outro Estado / Desconhecido', embora o código municipal exista.
+    """
+    fallback = {"310620": "Belo Horizonte/MG", "330455": "Rio de Janeiro/RJ", "355030": "São Paulo/SP"}
+    try:
+        url = "https://servicodados.ibge.gov.br/api/v1/localidades/municipios"
+        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20).json()
+        mapa = {}
+        for m in res:
+            cod7 = str(m.get("id", ""))
+            nome = str(m.get("nome", "")).strip()
+            uf = m.get("microrregiao", {}).get("mesorregiao", {}).get("UF", {}).get("sigla", "")
+            if cod7 and nome:
+                mapa[cod7[:6]] = f"{nome}/{uf}" if uf else nome
+                mapa[cod7] = f"{nome}/{uf}" if uf else nome
+        return mapa if mapa else fallback
+    except Exception:
+        return fallback
+
+def mapear_codigo_municipio_serie(serie_codigos, mapa_local=None):
+    """Converte códigos municipais DATASUS em nomes, usando mapa nacional quando possível."""
+    mapa_nacional = buscar_mapa_municipios_brasil()
+    mapa = {}
+    if mapa_local:
+        mapa.update(mapa_local)
+    mapa.update(mapa_nacional)
+
+    cod6 = (serie_codigos.astype(str)
+            .str.replace(r"\.0$", "", regex=True)
+            .str.replace("-", "", regex=False)
+            .str.strip()
+            .str.zfill(6)
+            .str[:6])
+    return cod6.map(mapa).fillna("Outro país / Ignorado / Código não identificado")
+
 def limpar_cache_pysus_sih():
     caminhos_cache = [
         os.path.expanduser("~/pysus/downloads/ducklake/sih"),
@@ -163,6 +203,47 @@ def agrupar_faixa_etaria(idade):
     if idade < 40: return "20 a 39 anos"
     if idade < 60: return "40 a 59 anos"
     return "60 anos ou mais"
+
+def grafico_barras_seguro(valores, color=None, mensagem_vazio="Sem dados suficientes para gerar este gráfico."):
+    """Renderiza gráfico apenas quando há dados válidos.
+
+    Evita o bug/aviso do Altair em consultas grandes ou recortes sem categorias,
+    situação que apareceu com SIM em municípios de maior fluxo, como RJ e SP.
+    """
+    try:
+        if valores is None:
+            st.info(mensagem_vazio)
+            return
+
+        dados = valores.copy() if hasattr(valores, "copy") else valores
+
+        if isinstance(dados, pd.Series):
+            dados = dados.dropna()
+            if dados.empty:
+                st.info(mensagem_vazio)
+                return
+            # Remove categorias textuais vazias sem apagar categorias legítimas como "Ignorado".
+            idx_txt = dados.index.astype(str).str.strip()
+            dados = dados[idx_txt != ""]
+            if dados.empty:
+                st.info(mensagem_vazio)
+                return
+        elif isinstance(dados, pd.DataFrame):
+            if dados.empty:
+                st.info(mensagem_vazio)
+                return
+            # Remove linhas completamente vazias.
+            dados = dados.dropna(how="all")
+            if dados.empty:
+                st.info(mensagem_vazio)
+                return
+
+        if color:
+            st.bar_chart(dados, color=color)
+        else:
+            st.bar_chart(dados)
+    except Exception as e:
+        st.info(f"Não foi possível montar este gráfico: {e}")
 
 def decodificar_cbo(codigo):
     cod_str = normalizar_codigo(codigo).zfill(6)
@@ -483,7 +564,7 @@ def gerar_metricas_cnes(df, grupo):
         metricas["principal_value"] = len(df)
     return metricas
 
-def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo="", tipo_resultado="Amostra limitada de microdados"):
+def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_grupo=None, cnes_grupo=None, nivel_terr="Estado", id_datasus_alvo="", tipo_resultado="Amostra limitada de microdados", usar_sim_nacional=True):
     if not api_sim: return pd.DataFrame({"Erro": ["Biblioteca PySUS não detectada."]})
     partes_final = []
     meses_para_baixar = [mes_num] if mes_num else [None]
@@ -493,14 +574,17 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
     sucessos_download = 0
     id_filtro = id_datasus_alvo if nivel_terr == "Município" else ""
 
-    # CORREÇÃO SIM / Município:
-    # Os arquivos anuais do SIM no DATASUS/PySUS são particionados por UF de residência.
-    # Portanto, para bater com o TAB/DATASUS em "Óbitos por Município de Ocorrência",
-    # não basta baixar apenas a UF do município selecionado. Um óbito ocorrido em BH de
-    # residente de SP, RJ, BA etc. ficará no arquivo da UF de residência dessa pessoa.
-    # Assim, no recorte municipal do SIM, varremos todas as UFs e filtramos depois por
-    # CODMUNRES OU CODMUNOCO/CODMUNOCOR. Isso preserva também a métrica por residência.
-    if "SIM" in sistema and nivel_terr == "Município" and id_datasus_alvo:
+    # CORREÇÃO SIM / Município - versão mais fiel ao TAB/DATASUS:
+    # O SIM possui arquivos estaduais e também o arquivo nacional DOBR. A varredura
+    # das 27 UFs corrige quase tudo, mas pode deixar de fora registros com residência
+    # ignorada/exterior ou registros que entram apenas no consolidado nacional.
+    # Para bater melhor com "Óbitos por Município de Ocorrência" do TAB/DATASUS,
+    # primeiro tentamos o arquivo nacional (BR/DOBR) e filtramos por CODMUNOCOR.
+    # Se o PySUS não retornar o BR no ambiente, fazemos fallback automático para as 27 UFs.
+    sim_municipal = "SIM" in sistema and nivel_terr == "Município" and bool(id_datasus_alvo)
+    if sim_municipal and usar_sim_nacional:
+        ufs_iteracao = ["BR"]
+    elif sim_municipal:
         ufs_iteracao = UFS
     else:
         ufs_iteracao = ufs_lista
@@ -593,6 +677,8 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
         if not df_temp.empty:
             df_temp = aplicar_filtros_imediato(df_temp, sistema, nivel_terr, uf, id_datasus_alvo, mes_num, cols_alvo_dict, dt_alvos)
             if not df_temp.empty:
+                if "SIM" in sistema and nivel_terr == "Município":
+                    df_temp["UF_ARQUIVO_SIM"] = uf
                 partes_final.append(df_temp)
                 sucessos_download += 1
             else: falhas.append(f"{sistema} SEM REGISTROS APÓS FILTRO FINAL | {uf} {ano}")
@@ -602,6 +688,22 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
         gc.collect()
 
     if not partes_final:
+        # Se a tentativa com o arquivo nacional BR/DOBR falhar no PySUS,
+        # repete automaticamente usando as 27 UFs como fallback.
+        if "SIM" in sistema and nivel_terr == "Município" and usar_sim_nacional:
+            return buscar_datasus_v7(
+                sistema=sistema,
+                ufs_lista=ufs_lista,
+                ano=ano,
+                mes_num=mes_num,
+                agravo=agravo,
+                sih_grupo=sih_grupo,
+                cnes_grupo=cnes_grupo,
+                nivel_terr=nivel_terr,
+                id_datasus_alvo=id_datasus_alvo,
+                tipo_resultado=tipo_resultado,
+                usar_sim_nacional=False,
+            )
         if any("SEM REGISTROS" in f for f in falhas):
             return pd.DataFrame({"Erro": ["A base foi processada, mas não há registros para o território, período ou agravo selecionados. O Datasus pode não ter publicado esses dados ainda."]})
         else:
@@ -862,6 +964,12 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     c1, c2 = st.columns(2)
                                     c1.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 Óbitos por Município de Ocorrência</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2><p>Ocorreram no município</p></div>', unsafe_allow_html=True)
                                     c2.markdown(f'<div class="metric-card" style="border-left: 5px solid #28a745;"><h4>🏠 Óbitos de Moradores do Município</h4><h2 style="color:#28a745; margin:0;">{vol_res:,}</h2><p>Moradores locais</p></div>', unsafe_allow_html=True)
+                                    if "UF_ARQUIVO_SIM" in df_tratado.columns:
+                                        fontes_sim = sorted(df_tratado["UF_ARQUIVO_SIM"].dropna().astype(str).unique().tolist())
+                                        if fontes_sim == ["BR"]:
+                                            st.caption("Fonte SIM: arquivo nacional BR/DOBR filtrado por município, para maior aderência ao TAB/DATASUS em óbitos por ocorrência.")
+                                        else:
+                                            st.caption(f"Fonte SIM: fallback por arquivos estaduais ({len(fontes_sim)} UF(s) com registros no recorte).")
                                 else:
                                     c1, c2 = st.columns(2)
                                     c1.markdown(f'<div class="metric-card" style="border-left: 5px solid #007bff;"><h4>🏥 {txt_oco}</h4><h2 style="color:#007bff; margin:0;">{vol_oco:,}</h2><p>{txt_oco_desc}</p></div>', unsafe_allow_html=True)
@@ -877,8 +985,8 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     st.write(f"- 🚑 **{vol_oco_fora}** vieram/são de fora. **De onde eles vieram?**")
                                     if vol_oco_fora > 0:
                                         df_in = df_tratado[mask_oco & ~mask_res].copy()
-                                        df_in['Origem'] = df_in[col_res].astype(str).str[:6].map(mapa_ibge).fillna("Outro Estado / Desconhecido")
-                                        st.bar_chart(df_in['Origem'].value_counts().head(10), color="#007bff")
+                                        df_in['Origem'] = mapear_codigo_municipio_serie(df_in[col_res], mapa_ibge)
+                                        grafico_barras_seguro(df_in['Origem'].value_counts().head(10), color="#007bff")
                                     else:
                                         st.info("Nenhuma ocorrência de pessoa de fora registrada na cidade.")
 
@@ -888,8 +996,8 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                     st.write(f"- 🚑 **{vol_res_fora}** viajaram/ocorreram fora. **Para onde eles foram?**")
                                     if vol_res_fora > 0:
                                         df_out = df_tratado[mask_res & ~mask_oco].copy()
-                                        df_out['Destino'] = df_out[col_oco].astype(str).str[:6].map(mapa_ibge).fillna("Outro Estado / Desconhecido")
-                                        st.bar_chart(df_out['Destino'].value_counts().head(10), color="#28a745")
+                                        df_out['Destino'] = mapear_codigo_municipio_serie(df_out[col_oco], mapa_ibge)
+                                        grafico_barras_seguro(df_out['Destino'].value_counts().head(10), color="#28a745")
                                     else:
                                         st.info("Nenhum morador precisou sair da cidade (Não há evasão).")
 
@@ -944,35 +1052,35 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 if "SIH" in sistema:
                                     c_faixa, c_sexo, c_morte = st.columns(3)
                                     with c_faixa:
-                                        if "Faixa Etária" in df_dash.columns: st.bar_chart(df_dash["Faixa Etária"].value_counts().sort_index())
+                                        if "Faixa Etária" in df_dash.columns: grafico_barras_seguro(df_dash["Faixa Etária"].value_counts().sort_index())
                                     with c_sexo:
                                         col_sexo = next((c for c in df_dash.columns if "Sexo Paciente" in c), None)
-                                        if col_sexo: st.bar_chart(df_dash[col_sexo].value_counts())
+                                        if col_sexo: grafico_barras_seguro(df_dash[col_sexo].value_counts())
                                     with c_morte:
-                                        if "Desfecho (Alta/Óbito)" in df_dash.columns: st.bar_chart(df_dash["Desfecho (Alta/Óbito)"].value_counts())
+                                        if "Desfecho (Alta/Óbito)" in df_dash.columns: grafico_barras_seguro(df_dash["Desfecho (Alta/Óbito)"].value_counts())
 
                                     c_a, c_b = st.columns(2)
                                     if "Procedimento Realizado (SIGTAP)" in df_dash.columns:
-                                        with c_a: st.bar_chart(df_dash["Procedimento Realizado (SIGTAP)"].value_counts().head(10))
+                                        with c_a: grafico_barras_seguro(df_dash["Procedimento Realizado (SIGTAP)"].value_counts().head(10))
                                     if "Diagnóstico Principal (CID-10)" in df_dash.columns:
-                                        with c_b: st.bar_chart(df_dash["Diagnóstico Principal (CID-10)"].value_counts().head(10))
+                                        with c_b: grafico_barras_seguro(df_dash["Diagnóstico Principal (CID-10)"].value_counts().head(10))
 
                                 elif "SINASC" in sistema:
                                     c1, c2, c3 = st.columns(3)
                                     with c1:
-                                        if "Faixa Etária da Mãe" in df_dash.columns: st.bar_chart(df_dash["Faixa Etária da Mãe"].value_counts().sort_index())
+                                        if "Faixa Etária da Mãe" in df_dash.columns: grafico_barras_seguro(df_dash["Faixa Etária da Mãe"].value_counts().sort_index())
                                     with c2:
-                                        if "Escolaridade Mãe (2010)" in df_dash.columns: st.bar_chart(df_dash["Escolaridade Mãe (2010)"].value_counts())
+                                        if "Escolaridade Mãe (2010)" in df_dash.columns: grafico_barras_seguro(df_dash["Escolaridade Mãe (2010)"].value_counts())
                                     with c3:
                                         col_cor_mae = next((c for c in df_dash.columns if "Raça/Cor da Mãe" in c), None)
-                                        if col_cor_mae: st.bar_chart(df_dash[col_cor_mae].value_counts())
+                                        if col_cor_mae: grafico_barras_seguro(df_dash[col_cor_mae].value_counts())
 
                                     c4, c5 = st.columns(2)
                                     with c4:
-                                        if "Ocupação/Profissão Mãe (CBO)" in df_dash.columns: st.bar_chart(df_dash["Ocupação/Profissão Mãe (CBO)"].value_counts().head(10))
+                                        if "Ocupação/Profissão Mãe (CBO)" in df_dash.columns: grafico_barras_seguro(df_dash["Ocupação/Profissão Mãe (CBO)"].value_counts().head(10))
                                     with c5:
                                         col_sexo = next((c for c in df_dash.columns if "Sexo Bebê" in c), None)
-                                        if col_sexo: st.bar_chart(df_dash[col_sexo].value_counts())
+                                        if col_sexo: grafico_barras_seguro(df_dash[col_sexo].value_counts())
 
                                 elif "CNES" in sistema:
                                     st.write("### 🏥 Estrutura e Capacidade Instalada")
@@ -980,9 +1088,9 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                         c1, c2 = st.columns([1, 2])
                                         with c1:
                                             st.write("**Tipos de Estabelecimentos (Top 10)**")
-                                            if "Tipo de Estabelecimento" in df_dash.columns: st.bar_chart(df_dash["Tipo de Estabelecimento"].value_counts().head(10))
+                                            if "Tipo de Estabelecimento" in df_dash.columns: grafico_barras_seguro(df_dash["Tipo de Estabelecimento"].value_counts().head(10))
                                             st.write("**Atende ao SUS?**")
-                                            if "Atende SUS?" in df_dash.columns: st.bar_chart(df_dash["Atende SUS?"].value_counts())
+                                            if "Atende SUS?" in df_dash.columns: grafico_barras_seguro(df_dash["Atende SUS?"].value_counts())
                                         with c2:
                                             st.write("**Top 15 Maiores Estabelecimentos da Cidade**")
                                             st.caption("🔍 Consulte os detalhes pelo código CNES em: https://cnes.datasus.gov.br/pages/estabelecimentos/consulta.jsp")
@@ -1000,7 +1108,7 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                                 soma_sus = df_dash["QT_SUS"].sum()
                                                 soma_nsus = df_dash["QT_NSUS"].sum()
                                                 df_plot = pd.DataFrame({"Quantidade Física": [soma_sus, soma_nsus]}, index=["Leitos dedicados ao SUS", "Leitos Privados (Não SUS)"])
-                                                st.bar_chart(df_plot)
+                                                grafico_barras_seguro(df_plot)
                                         with c2:
                                             st.write("**Leitos de UTI vs Comuns**")
                                             st.info("Acesse a aba 'Planilha Tratada' para visualizar a quantidade física exata e detalhada por especialidade médica.")
@@ -1010,48 +1118,48 @@ if aba_ativa == "📋 Guia Principal (Extração)":
                                 elif "SINAN" in sistema:
                                     c1, c2, c3 = st.columns(3)
                                     with c1:
-                                        if "Faixa Etária" in df_dash.columns: st.bar_chart(df_dash["Faixa Etária"].value_counts().sort_index())
+                                        if "Faixa Etária" in df_dash.columns: grafico_barras_seguro(df_dash["Faixa Etária"].value_counts().sort_index())
                                     with c2:
                                         col_sexo = next((c for c in df_dash.columns if "Sexo" in c), None)
-                                        if col_sexo: st.bar_chart(df_dash[col_sexo].value_counts())
+                                        if col_sexo: grafico_barras_seguro(df_dash[col_sexo].value_counts())
                                     with c3:
                                         col_raca = next((c for c in df_dash.columns if "Raça" in c), None)
-                                        if col_raca: st.bar_chart(df_dash[col_raca].value_counts())
+                                        if col_raca: grafico_barras_seguro(df_dash[col_raca].value_counts())
 
                                     if "Transmissão (Sexual)" in df_dash.columns:
                                         st.write("### Modo de Transmissão (AIDS/ISTs)")
-                                        st.bar_chart(df_dash["Transmissão (Sexual)"].value_counts())
+                                        grafico_barras_seguro(df_dash["Transmissão (Sexual)"].value_counts())
 
                                     if "Bairro Provável Infecção" in df_dash.columns:
                                         st.write("### Bairros de Infecção (Top 10)")
-                                        st.bar_chart(df_dash["Bairro Provável Infecção"].value_counts().head(10))
+                                        grafico_barras_seguro(df_dash["Bairro Provável Infecção"].value_counts().head(10))
 
                                 elif "SIM" in sistema:
                                     c1, c2, c3 = st.columns(3)
                                     with c1:
-                                        if "Faixa Etária" in df_dash.columns: st.bar_chart(df_dash["Faixa Etária"].value_counts().sort_index())
+                                        if "Faixa Etária" in df_dash.columns: grafico_barras_seguro(df_dash["Faixa Etária"].value_counts().sort_index())
                                     with c2:
                                         col_sexo = next((c for c in df_dash.columns if "Sexo" in c), None)
-                                        if col_sexo: st.bar_chart(df_dash[col_sexo].value_counts())
+                                        if col_sexo: grafico_barras_seguro(df_dash[col_sexo].value_counts())
                                     with c3:
                                         col_raca = next((c for c in df_dash.columns if "Raça" in c), None)
-                                        if col_raca: st.bar_chart(df_dash[col_raca].value_counts())
+                                        if col_raca: grafico_barras_seguro(df_dash[col_raca].value_counts())
 
                                     st.write("---")
                                     c_a, c_b = st.columns(2)
                                     with c_a:
                                         st.write("### Causa Básica do Óbito")
                                         col_doenca = next((c for c in df_dash.columns if "Causa Básica (CID-10)" in c), None)
-                                        if col_doenca: st.bar_chart(df_dash[col_doenca].value_counts().head(10))
+                                        if col_doenca: grafico_barras_seguro(df_dash[col_doenca].value_counts().head(10))
                                     with c_b:
                                         if "Local de Ocorrência" in df_dash.columns:
                                             st.write("### Local do Óbito")
-                                            st.bar_chart(df_dash["Local de Ocorrência"].value_counts())
+                                            grafico_barras_seguro(df_dash["Local de Ocorrência"].value_counts())
 
                                     if "Circunstância do Óbito" in df_dash.columns:
                                         st.write("---")
                                         st.write("### Circunstância do Óbito (Não Naturais)")
-                                        st.bar_chart(df_dash["Circunstância do Óbito"].value_counts())
+                                        grafico_barras_seguro(df_dash["Circunstância do Óbito"].value_counts())
                     else:
                         msg = df_bruto["Erro"].iloc[0] if not df_bruto.empty else "Sem dados disponíveis."
                         if "território, período ou agravo" in msg:
