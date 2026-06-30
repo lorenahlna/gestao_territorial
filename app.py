@@ -800,7 +800,7 @@ st.sidebar.title("🧬 Navegação e Filtros")
 aba_ativa = st.sidebar.radio("Navegar para:", ["📋 Guia Principal (Extração)", "📚 Dicionários e Citações"])
 
 if aba_ativa == "📋 Guia Principal (Extração)":
-    st.markdown('<div class="header-sidra"><h1>Central de Inteligência Territorial</h1><p>DATASUS conectado via DuckDB | SIDRA e VIS DATA 3 em desenvolvimento</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="header-sidra"><h1>Central de Inteligência Territorial</h1><p>DATASUS conectado  | SIDRA </p></div>', unsafe_allow_html=True)
     fonte = st.sidebar.radio("Base de Informação:", ["🏥 Saúde (DATASUS)", "🏠 Social (VIS DATA 3 - Indisponível)"])
     if "VIS DATA 3" in fonte:
         st.warning("VIS DATA 3 ainda não está conectado nesta versão.")
