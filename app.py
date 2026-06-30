@@ -493,7 +493,19 @@ def buscar_datasus_v7(sistema, ufs_lista, ano, mes_num=None, agravo=None, sih_gr
     sucessos_download = 0
     id_filtro = id_datasus_alvo if nivel_terr == "Município" else ""
 
-    for uf in ufs_lista:
+    # CORREÇÃO SIM / Município:
+    # Os arquivos anuais do SIM no DATASUS/PySUS são particionados por UF de residência.
+    # Portanto, para bater com o TAB/DATASUS em "Óbitos por Município de Ocorrência",
+    # não basta baixar apenas a UF do município selecionado. Um óbito ocorrido em BH de
+    # residente de SP, RJ, BA etc. ficará no arquivo da UF de residência dessa pessoa.
+    # Assim, no recorte municipal do SIM, varremos todas as UFs e filtramos depois por
+    # CODMUNRES OU CODMUNOCO/CODMUNOCOR. Isso preserva também a métrica por residência.
+    if "SIM" in sistema and nivel_terr == "Município" and id_datasus_alvo:
+        ufs_iteracao = UFS
+    else:
+        ufs_iteracao = ufs_lista
+
+    for uf in ufs_iteracao:
         if "SIH" in sistema:
             if sih_grupo == "CM":
                 st.error("O grupo SIH/CM exige rotina própria via pysus.ftp.databases.sih.SIH e não será processado no fluxo mensal UF/município desta versão.")
